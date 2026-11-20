@@ -755,6 +755,8 @@ def tts(
         if timeline.measured_lufs is not None
         else "voice only (--no-mix)"
     )
+    for ev in timeline.fallback_events:
+        console.print(f"[yellow][WARN][/yellow] {ev}")
     console.print(
         f"[green][OK][/green] TTS ({timeline.provider}) for '{slug}': "
         f"{len(timeline.beats)} beats, {timeline.total_duration_sec:.2f}s ({mix_info})"

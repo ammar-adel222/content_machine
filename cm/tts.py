@@ -28,8 +28,44 @@ from cm.paths import atomic_write_text, get_repo_root, run_dir
 from cm.state import load_state
 
 DEFAULT_SAMPLE_RATE = 48000
-DEFAULT_TTS_MODEL = "gemini-2.5-flash-preview-tts"
-DEFAULT_TTS_VOICE = "Charon"
+GEMINI_TTS_MODEL_CASCADE: tuple[str, ...] = (
+    "gemini-2.5-pro-preview-tts",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-preview-tts",
+)
+
+
+def is_fallback_worthy_error(exc: Exception) -> bool:
+    """Return True when a Gemini TTS error reflects quota/credits/availability."""
+    raw_status = getattr(exc, "code", None)
+    if raw_status is None:
+        raw_status = getattr(exc, "status_code", None)
+    status = int(raw_status) if isinstance(raw_status, int) else None
+    msg = str(exc).lower()
+
+    if status == 401 or any(
+        tok in msg for tok in ("api_key_invalid", "invalid api key", "unauthenticated")
+    ):
+        return False
+
+    if status in {402, 403, 404, 429, 503}:
+        return True
+
+    return any(
+        tok in msg
+        for tok in (
+            "resource_exhausted",
+            "quota",
+            "rate limit",
+            "credit",
+            "billing",
+            "overloaded",
+            "unavailable",
+            "not found",
+            "not supported",
+            "deprecated",
+        )
+    )
 
 
 class TtsProvider(StrEnum):
@@ -453,18 +489,13 @@ def synthesize_run_tts(
             )
         resolved_provider = TtsProvider.GEMINI
 
-    resolved_model = (
-        "mock-tts-v1"
+    resolved_voice = voice_name or blueprint.voice.voice_name
+    style_prompt = blueprint.voice.style_prompt
+    model_cascade: tuple[str, ...] = (
+        ("mock-tts-v1",)
         if resolved_provider == TtsProvider.MOCK
-        else (model or os.environ.get("GEMINI_TTS_MODEL") or DEFAULT_TTS_MODEL)
+        else ((model,) if model else GEMINI_TTS_MODEL_CASCADE)
     )
-    resolved_voice = (
-        voice_name
-        or blueprint.voice.voice_name
-        or os.environ.get("GEMINI_TTS_VOICE")
-        or DEFAULT_TTS_VOICE
-    )
-    style_prompt = blueprint.voice.style_prompt or os.environ.get("GEMINI_TTS_STYLE_PROMPT")
 
     audio_dir = rdir / "audio"
     cache_dir = audio_dir / "cache"
@@ -472,48 +503,78 @@ def synthesize_run_tts(
     cache_dir.mkdir(parents=True, exist_ok=True)
     beats_dir.mkdir(parents=True, exist_ok=True)
 
+    active_idx = 0
+    fallback_events: list[str] = []
     beat_clip_specs: list[tuple[Path, int]] = []
     cache_keys: list[str] = []
     beat_rel_paths: list[str] = []
+    beat_models: list[str] = []
 
     for beat in blueprint.beats:
-        key = compute_cache_key(
-            provider=resolved_provider.value,
-            model=resolved_model,
-            voice_name=resolved_voice,
-            style_prompt=style_prompt,
-            narration=beat.narration,
-        )
-        cached_wav = cache_dir / f"{key}.wav"
-        if force or not cached_wav.is_file():
-            if resolved_provider == TtsProvider.MOCK:
-                synthesize_mock_clip(
-                    narration=beat.narration,
-                    target_wpm=blueprint.voice.target_wpm,
-                    out_wav=cached_wav,
-                )
-            else:
-                synthesize_gemini_clip(
-                    narration=beat.narration,
-                    model=resolved_model,
-                    voice_name=resolved_voice,
-                    style_prompt=style_prompt,
-                    api_key=api_key,
-                    out_wav=cached_wav,
-                )
+        chosen_key = ""
+        chosen_model = ""
+        chosen_wav = cache_dir / "unset.wav"
+
+        while active_idx < len(model_cascade):
+            current_model = model_cascade[active_idx]
+            key = compute_cache_key(
+                provider=resolved_provider.value,
+                model=current_model,
+                voice_name=resolved_voice,
+                style_prompt=style_prompt,
+                narration=beat.narration,
+            )
+            cached_wav = cache_dir / f"{key}.wav"
+            if force or not cached_wav.is_file():
+                if resolved_provider == TtsProvider.MOCK:
+                    synthesize_mock_clip(
+                        narration=beat.narration,
+                        target_wpm=blueprint.voice.target_wpm,
+                        out_wav=cached_wav,
+                    )
+                else:
+                    try:
+                        synthesize_gemini_clip(
+                            narration=beat.narration,
+                            model=current_model,
+                            voice_name=resolved_voice,
+                            style_prompt=style_prompt,
+                            api_key=api_key,
+                            out_wav=cached_wav,
+                        )
+                    except Exception as exc:
+                        if not is_fallback_worthy_error(exc):
+                            raise
+                        if active_idx + 1 < len(model_cascade):
+                            next_model = model_cascade[active_idx + 1]
+                            fallback_events.append(
+                                f"Beat {beat.id}: downgraded {current_model} -> {next_model} ({exc})"
+                            )
+                            active_idx += 1
+                            continue
+                        raise RuntimeError(
+                            f"All Gemini TTS models exhausted for beat '{beat.id}' "
+                            f"({', '.join(model_cascade)}): {exc}"
+                        ) from exc
+
+            chosen_key = key
+            chosen_model = current_model
+            chosen_wav = cached_wav
+            break
 
         beat_wav = beats_dir / f"{beat.id}.wav"
-        shutil.copy2(cached_wav, beat_wav)
+        shutil.copy2(chosen_wav, beat_wav)
         beat_clip_specs.append((beat_wav, beat.pause_after_ms))
-        cache_keys.append(key)
+        cache_keys.append(chosen_key)
         beat_rel_paths.append(f"beats/{beat.id}.wav")
+        beat_models.append(chosen_model)
 
     voice_master_wav = audio_dir / "voice_master.wav"
     boundaries = assemble_voice_track(beat_clip_specs, voice_master_wav)
 
     timed_beats: list[TimedBeatAudio] = []
-    for beat, key, rel_path, (start_sec, speech_end_sec, end_sec) in zip(
-        blueprint.beats, cache_keys, beat_rel_paths, boundaries, strict=True
+    for beat, key, beat_model, rel_path, (start_sec, speech_end_sec, end_sec) in zip(
+        blueprint.beats, cache_keys, beat_models, beat_rel_paths, boundaries, strict=True
     ):
         timed_beats.append(
             TimedBeatAudio(
@@ -524,6 +585,7 @@ def synthesize_run_tts(
                 cache_key=key,
                 clip_path=rel_path,
                 provider=resolved_provider.value,  # type: ignore[arg-type]
+                model=beat_model,
                 start_sec=start_sec,
                 speech_end_sec=speech_end_sec,
                 end_sec=end_sec,
@@ -537,11 +599,12 @@ def synthesize_run_tts(
     timeline = AudioTimeline(
         slug=slug,
         provider=resolved_provider.value,  # type: ignore[arg-type]
-        model=resolved_model,
+        model=model_cascade[active_idx],
         voice_name=resolved_voice,
         sample_rate=DEFAULT_SAMPLE_RATE,
         total_duration_sec=round(total_duration, 4),
         voice_track_path="voice_master.wav",
+        fallback_events=fallback_events,
         beats=timed_beats,
     )
 

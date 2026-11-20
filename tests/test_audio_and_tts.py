@@ -36,9 +36,11 @@ from cm.sfx import (
 )
 from cm.state import init_run, load_state, update_stage
 from cm.tts import (
+    GEMINI_TTS_MODEL_CASCADE,
     TtsProvider,
     assemble_voice_track,
     compute_cache_key,
+    is_fallback_worthy_error,
     normalize_tts_bytes_to_wav,
     parse_pcm_rate,
     read_wav_duration_sec,
@@ -438,3 +440,126 @@ def test_cli_sfx_tts_audio_and_schema_commands(
     res_schema = runner.invoke(app, ["schema", "timeline"])
     assert res_schema.exit_code == 0
     assert "sfx_events" in json.loads(res_schema.output)["properties"]
+
+
+class _HttpError(Exception):
+    def __init__(self, code: int | None, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def test_gemini_tts_strongest_first_cascade_and_env_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CM_ROOT", str(tmp_path))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    # Error classifier unit checks
+    assert is_fallback_worthy_error(_HttpError(429, "RESOURCE_EXHAUSTED")) is True
+    assert is_fallback_worthy_error(_HttpError(404, "model not found")) is True
+    assert is_fallback_worthy_error(RuntimeError("insufficient credit balance")) is True
+    assert is_fallback_worthy_error(_HttpError(401, "API_KEY_INVALID")) is False
+    assert is_fallback_worthy_error(ValueError("bad local path")) is False
+
+    # .env model/voice/tone vars must be completely ignored; only GEMINI_API_KEY is read
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "GEMINI_API_KEY=live-key",
+                "GEMINI_TTS_MODEL=ignored-env-model",
+                "GEMINI_TTS_VOICE=IgnoredEnvVoice",
+                "GEMINI_TTS_STYLE_PROMPT=Ignored env tone",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    init_run("cascade-run", from_blueprint=EXAMPLE_BP)
+
+    pcm_bytes = _tone_pcm_bytes(0.4, rate=24000)
+
+    # 1. Mid-run quota downgrade: beat 0 succeeds on strongest model, beat 1 hits 429 -> downgrades to #2
+    attempts_1: list[tuple[str, str, str | None]] = []
+
+    def fake_gemini_mid_downgrade(
+        narration: str,
+        model: str,
+        voice_name: str,
+        style_prompt: str | None,
+        api_key: str,
+        out_wav: Path,
+    ) -> float:
+        _ = api_key
+        attempts_1.append((narration[:15], model, style_prompt))
+        if model == GEMINI_TTS_MODEL_CASCADE[0] and len(attempts_1) >= 2:
+            raise _HttpError(429, "Quota exceeded / RESOURCE_EXHAUSTED")
+        return normalize_tts_bytes_to_wav(
+            pcm_bytes, "audio/L16;codec=pcm;rate=24000", out_wav
+        )
+
+    monkeypatch.setattr("cm.tts.synthesize_gemini_clip", fake_gemini_mid_downgrade)
+    res_cli = runner.invoke(app, ["tts", "cascade-run", "--provider", "auto"])
+    assert res_cli.exit_code == 0, res_cli.output
+    assert "[WARN]" in res_cli.output
+    res_cli.output.encode("cp1252")
+
+    tl = AudioTimeline.model_validate_json(
+        (tmp_path / "runs" / "cascade-run" / "audio" / "timeline.json").read_text(encoding="utf-8")
+    )
+    assert tl.voice_name == "Charon"  # From blueprint, NOT IgnoredEnvVoice
+    assert tl.beats[0].model == GEMINI_TTS_MODEL_CASCADE[0]
+    assert tl.beats[1].model == GEMINI_TTS_MODEL_CASCADE[1]
+    assert tl.beats[-1].model == GEMINI_TTS_MODEL_CASCADE[1]
+    assert tl.model == GEMINI_TTS_MODEL_CASCADE[1]
+    assert len(tl.fallback_events) == 1
+    assert all(m != "ignored-env-model" for _, m, _ in attempts_1)
+    assert all(sp != "Ignored env tone" for _, _, sp in attempts_1)
+
+    # 2. Multi-hop downgrade all the way to #3
+    attempts_2: list[str] = []
+
+    def fake_gemini_multi_hop(
+        narration: str,
+        model: str,
+        voice_name: str,
+        style_prompt: str | None,
+        api_key: str,
+        out_wav: Path,
+    ) -> float:
+        _ = (narration, voice_name, style_prompt, api_key)
+        attempts_2.append(model)
+        if model == GEMINI_TTS_MODEL_CASCADE[0]:
+            raise _HttpError(429, "Quota exceeded")
+        if model == GEMINI_TTS_MODEL_CASCADE[1]:
+            raise _HttpError(404, "Model not found")
+        return normalize_tts_bytes_to_wav(
+            pcm_bytes, "audio/L16;codec=pcm;rate=24000", out_wav
+        )
+
+    monkeypatch.setattr("cm.tts.synthesize_gemini_clip", fake_gemini_multi_hop)
+    tl_hop = synthesize_run_tts("cascade-run", provider=TtsProvider.GEMINI, force=True)
+    assert tl_hop.model == GEMINI_TTS_MODEL_CASCADE[2]
+    assert len(tl_hop.fallback_events) == 2
+    assert attempts_2[:3] == list(GEMINI_TTS_MODEL_CASCADE)
+    assert all(m == GEMINI_TTS_MODEL_CASCADE[2] for m in attempts_2[3:])
+
+    # 3. Exhausting ALL models raises clear RuntimeError
+    def fake_gemini_all_exhausted(**kwargs) -> float:
+        _ = kwargs
+        raise _HttpError(429, "Out of credits")
+
+    monkeypatch.setattr("cm.tts.synthesize_gemini_clip", fake_gemini_all_exhausted)
+    with pytest.raises(RuntimeError, match="All Gemini TTS models exhausted"):
+        synthesize_run_tts("cascade-run", provider=TtsProvider.GEMINI, force=True)
+
+    # 4. Auth error (401) fails fast on model #1 without trying fallbacks
+    auth_attempts: list[str] = []
+
+    def fake_gemini_auth_error(**kwargs) -> float:
+        auth_attempts.append(kwargs["model"])
+        raise _HttpError(401, "API_KEY_INVALID")
+
+    monkeypatch.setattr("cm.tts.synthesize_gemini_clip", fake_gemini_auth_error)
+    with pytest.raises(_HttpError, match="API_KEY_INVALID"):
+        synthesize_run_tts("cascade-run", provider=TtsProvider.GEMINI, force=True)
+    assert auth_attempts == [GEMINI_TTS_MODEL_CASCADE[0]]

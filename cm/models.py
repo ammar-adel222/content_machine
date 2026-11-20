@@ -502,6 +502,7 @@ class TimedBeatAudio(BaseModel):
     cache_key: str
     clip_path: str
     provider: Literal["gemini", "mock"]
+    model: str = ""
     start_sec: float
     speech_end_sec: float
     end_sec: float
@@ -534,5 +535,6 @@ class AudioTimeline(BaseModel):
     master_audio_path: str | None = None
     target_lufs: float = -14.0
     measured_lufs: float | None = None
+    fallback_events: list[str] = Field(default_factory=list)
     beats: list[TimedBeatAudio] = Field(default_factory=list)
     sfx_events: list[ScheduledSfx] = Field(default_factory=list)
