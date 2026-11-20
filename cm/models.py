@@ -1,0 +1,350 @@
+"""Typed Pydantic v2 contracts for blueprints, run state, catalog, and validation."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class FormatPreset(str, Enum):
+    """Supported video aspect ratios and pacing targets."""
+
+    SHORT_9X16 = "short_9x16"
+    LONG_16X9 = "long_16x9"
+
+
+class SafeZone(BaseModel):
+    """Platform UI safe margins in pixels."""
+
+    top: int
+    bottom: int
+    left: int
+    right: int
+
+
+class FormatSpec(BaseModel):
+    """Resolution, frame rate, pacing, and safe-zone constraints per format."""
+
+    preset: FormatPreset
+    width: int
+    height: int
+    fps_preview: int
+    fps_final: int
+    hard_min_duration_sec: float
+    recommended_min_duration_sec: float
+    recommended_max_duration_sec: float
+    hard_max_duration_sec: float
+    min_iterations: int
+    max_beat_warn_sec: float
+    max_beat_error_sec: float
+    safe_zone: SafeZone
+
+
+FORMAT_SPECS: dict[FormatPreset, FormatSpec] = {
+    FormatPreset.SHORT_9X16: FormatSpec(
+        preset=FormatPreset.SHORT_9X16,
+        width=1080,
+        height=1920,
+        fps_preview=30,
+        fps_final=60,
+        hard_min_duration_sec=30.0,
+        recommended_min_duration_sec=45.0,
+        recommended_max_duration_sec=85.0,
+        hard_max_duration_sec=95.0,
+        min_iterations=3,
+        max_beat_warn_sec=9.0,
+        max_beat_error_sec=13.0,
+        safe_zone=SafeZone(top=160, bottom=360, left=64, right=160),
+    ),
+    FormatPreset.LONG_16X9: FormatSpec(
+        preset=FormatPreset.LONG_16X9,
+        width=1920,
+        height=1080,
+        fps_preview=30,
+        fps_final=60,
+        hard_min_duration_sec=150.0,
+        recommended_min_duration_sec=240.0,
+        recommended_max_duration_sec=600.0,
+        hard_max_duration_sec=900.0,
+        min_iterations=5,
+        max_beat_warn_sec=18.0,
+        max_beat_error_sec=28.0,
+        safe_zone=SafeZone(top=64, bottom=96, left=80, right=80),
+    ),
+}
+
+
+class TopicDomain(str, Enum):
+    """Core CS and AI subject categories."""
+
+    CS = "cs"
+    AI = "ai"
+    SYSTEMS = "systems"
+    SECURITY = "security"
+    NETWORKING = "networking"
+    DATABASES = "databases"
+
+
+class SfxCue(str, Enum):
+    """Semantic sound-effect slots resolved by assets/sfx/manifest.json."""
+
+    POP_BUILD = "pop_build"
+    CLICK_UI = "click_ui"
+    WHOOSH = "whoosh"
+    TICK_DATA = "tick_data"
+    RISER_STRESS = "riser_stress"
+    PULSE_LOAD = "pulse_load"
+    IMPACT_FAIL = "impact_fail"
+    GLITCH_ERROR = "glitch_error"
+    ALARM_BREACH = "alarm_breach"
+    STAMP_HIT = "stamp_hit"
+    CHIME_FIX = "chime_fix"
+    LOCK_UPGRADE = "lock_upgrade"
+
+
+class SfxTrigger(BaseModel):
+    """A sound-effect cue anchored within a beat."""
+
+    cue: SfxCue
+    at: Literal["start", "mid", "end"] | float = "start"
+    gain_db: float = Field(default=-12.0, ge=-30.0, le=0.0)
+
+    @field_validator("at")
+    @classmethod
+    def validate_at(cls, value: str | float) -> str | float:
+        """Ensure fractional offsets lie within [0.0, 1.0]."""
+        if isinstance(value, bool):
+            raise ValueError("'at' cannot be a boolean")
+        if isinstance(value, (int, float)):
+            fval = float(value)
+            if not 0.0 <= fval <= 1.0:
+                raise ValueError("Numeric 'at' offset must be between 0.0 and 1.0")
+            return fval
+        return value
+
+
+class BeatKind(str, Enum):
+    """Narrative role of a beat in the Build -> Stress-Test -> Fail -> Upgrade loop."""
+
+    HOOK = "hook"
+    BUILD = "build"
+    STRESS_TEST = "stress_test"
+    FAIL = "fail"
+    UPGRADE = "upgrade"
+    PAYOFF = "payoff"
+
+
+class SystemStatus(str, Enum):
+    """HUD status indicator displayed on the persistent system diagram."""
+
+    INITIALIZING = "initializing"
+    BUILDING = "building"
+    TESTING = "testing"
+    COMPROMISED = "compromised"
+    DEGRADED = "degraded"
+    UPGRADED = "upgraded"
+    RESILIENT = "resilient"
+
+
+class MetricCallout(BaseModel):
+    """Optional live metric badge rendered inside the 2D HUD."""
+
+    label: str = Field(min_length=1, max_length=24)
+    value: str = Field(min_length=1, max_length=24)
+    severity: Literal["neutral", "warn", "danger", "good"] = "neutral"
+
+
+class VoiceSettings(BaseModel):
+    """Gemini TTS voice parameters and pacing rate."""
+
+    voice_name: str = Field(default="Charon", min_length=1)
+    style_prompt: str | None = None
+    target_wpm: int = Field(default=165, ge=120, le=220)
+
+
+class Beat(BaseModel):
+    """Single timed beat inside a Build -> Stress-Test -> Fail -> Upgrade script."""
+
+    id: str = Field(pattern=r"^[a-z0-9_]+$")
+    kind: BeatKind
+    version_label: str = Field(min_length=1)
+    system_status: SystemStatus
+    narration: str
+    on_screen_headline: str
+    visual_state: str
+    visual_diff: str
+    stress_test_trigger: str | None = None
+    failure_stamp: str | None = None
+    metric_callout: MetricCallout | None = None
+    pause_after_ms: int = Field(default=180, ge=0, le=1200)
+    sfx: list[SfxTrigger] = Field(default_factory=list)
+    estimated_duration_sec: float | None = Field(default=None, gt=0.0)
+
+    @field_validator(
+        "version_label",
+        "narration",
+        "on_screen_headline",
+        "visual_state",
+        "visual_diff",
+    )
+    @classmethod
+    def require_non_empty_text(cls, value: str) -> str:
+        """Strip whitespace and reject blank strings."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Field cannot be blank")
+        return cleaned
+
+
+class Blueprint(BaseModel):
+    """Complete pre-production contract for a single video."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    title: str = Field(min_length=1, max_length=100)
+    topic_domain: TopicDomain
+    format: FormatPreset = FormatPreset.SHORT_9X16
+    core_premise: str = Field(min_length=1)
+    persistent_subject: str = Field(min_length=1)
+    target_audience: str = "curious non-technical viewers"
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    beats: list[Beat] = Field(min_length=4)
+
+
+class PipelineStage(str, Enum):
+    """Ordered production stages for a single run."""
+
+    IDEATE = "ideate"
+    BLUEPRINT = "blueprint"
+    AUDIO = "audio"
+    SCENE = "scene"
+    QA = "qa"
+    RENDER = "render"
+    PUBLISH = "publish"
+
+
+PIPELINE_ORDER: tuple[PipelineStage, ...] = (
+    PipelineStage.IDEATE,
+    PipelineStage.BLUEPRINT,
+    PipelineStage.AUDIO,
+    PipelineStage.SCENE,
+    PipelineStage.QA,
+    PipelineStage.RENDER,
+    PipelineStage.PUBLISH,
+)
+
+
+class StageStatus(str, Enum):
+    """Execution status of an individual pipeline stage."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class StageRecord(BaseModel):
+    """Checkpoint record for one stage inside runs/<slug>/state.json."""
+
+    status: StageStatus = StageStatus.PENDING
+    updated_at: datetime | None = None
+    artifact: str | None = None
+    notes: str | None = None
+    error_count: int = 0
+
+
+class RunState(BaseModel):
+    """File-backed state machine checkpoint persisted in runs/<slug>/state.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    title: str
+    topic_domain: TopicDomain
+    format: FormatPreset
+    idea_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    current_stage: PipelineStage = PipelineStage.BLUEPRINT
+    stages: dict[PipelineStage, StageRecord]
+
+
+class IdeaStatus(str, Enum):
+    """Lifecycle status of an idea in channels/catalog.json."""
+
+    BACKLOG = "backlog"
+    IN_PROGRESS = "in_progress"
+    PUBLISHED = "published"
+    REJECTED = "rejected"
+
+
+class IdeaEntry(BaseModel):
+    """Idea backlog entry with an explicit multi-step failure chain."""
+
+    id: str
+    slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    title: str = Field(min_length=1, max_length=100)
+    topic_domain: TopicDomain
+    format: FormatPreset = FormatPreset.SHORT_9X16
+    hook: str = Field(min_length=1)
+    failure_chain: list[str] = Field(min_length=3)
+    score: int = Field(default=7, ge=1, le=10)
+    status: IdeaStatus = IdeaStatus.BACKLOG
+    created_at: datetime
+
+
+class PublishedEntry(BaseModel):
+    """Receipt of a published video stored for history and deduplication."""
+
+    slug: str
+    title: str
+    topic_domain: TopicDomain
+    format: FormatPreset
+    published_at: datetime
+    platforms: dict[str, dict[str, str]] = Field(default_factory=dict)
+    keywords: list[str] = Field(default_factory=list)
+
+
+class Catalog(BaseModel):
+    """Channel-level idea backlog and published archive."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    channel_name: str = "Content Machine 3.0"
+    default_format: FormatPreset = FormatPreset.SHORT_9X16
+    ideas: list[IdeaEntry] = Field(default_factory=list)
+    published: list[PublishedEntry] = Field(default_factory=list)
+
+
+class LintIssue(BaseModel):
+    """Single actionable error or warning emitted by the blueprint validator."""
+
+    code: str
+    severity: Literal["error", "warning"]
+    beat_id: str | None = None
+    message: str
+    suggestion: str
+
+
+class BlueprintMetrics(BaseModel):
+    """Summary pacing and structural metrics calculated from a blueprint."""
+
+    beat_count: int
+    total_words: int
+    estimated_duration_sec: float
+    hook_duration_sec: float
+    iteration_count: int
+    version_progression: list[str]
+    beats_with_sfx: int
+
+
+class ValidationReport(BaseModel):
+    """Structured output returned by cm validate."""
+
+    passed: bool
+    target: str
+    errors: list[LintIssue]
+    warnings: list[LintIssue]
+    metrics: BlueprintMetrics | None = None
