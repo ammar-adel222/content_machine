@@ -28,6 +28,7 @@ from cm.paths import atomic_write_text, get_repo_root, run_dir
 from cm.state import load_state
 
 DEFAULT_SAMPLE_RATE = 48000
+DEFAULT_LEAD_IN_MS = 120
 GEMINI_TTS_MODEL_CASCADE: tuple[str, ...] = (
     "gemini-2.5-pro-preview-tts",
     "gemini-3.1-flash-tts-preview",
@@ -193,9 +194,11 @@ def normalize_tts_bytes_to_wav(
                 "-i",
                 str(resampled),
                 "-af",
-                "silenceremove=start_periods=1:start_threshold=-45dB:start_duration=0.02,"
+                "silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.005:start_silence=0.035:detection=peak,"
+                "afade=t=in:d=0.003,"
                 "areverse,"
-                "silenceremove=start_periods=1:start_threshold=-45dB:start_duration=0.02,"
+                "silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.005:start_silence=0.045:detection=peak,"
+                "afade=t=in:d=0.003,"
                 "areverse",
                 "-ac",
                 "1",
@@ -344,8 +347,9 @@ def assemble_voice_track(
     beat_clips: list[tuple[Path, int]],
     out_wav: Path,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    lead_in_ms: int = DEFAULT_LEAD_IN_MS,
 ) -> list[tuple[float, float, float]]:
-    """Concatenate 48 kHz mono PCM clips with sample-exact pause silence."""
+    """Concatenate 48 kHz mono PCM clips with lead-in pad and sample-exact pause silence."""
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     timings: list[tuple[float, float, float]] = []
     frame_cursor = 0
@@ -364,6 +368,11 @@ def assemble_voice_track(
             out_wf.setnchannels(1)
             out_wf.setsampwidth(2)
             out_wf.setframerate(sample_rate)
+
+            lead_in_frames = max(0, round((lead_in_ms / 1000.0) * sample_rate))
+            if lead_in_frames > 0:
+                out_wf.writeframes(b"\x00\x00" * lead_in_frames)
+                frame_cursor += lead_in_frames
 
             for clip_path, pause_ms in beat_clips:
                 with wave.open(str(clip_path), "rb") as in_wf:

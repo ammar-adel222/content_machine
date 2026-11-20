@@ -332,6 +332,51 @@ def test_assemble_voice_track_rejects_mismatched_wav_format(tmp_path: Path) -> N
         assemble_voice_track([(bad_wav, 100)], tmp_path / "out.wav")
 
 
+def test_tts_preserves_soft_consonant_onset_and_lead_in_pad(tmp_path: Path) -> None:
+    # 250ms silence + 50ms soft -38dB /h/ consonant + 250ms -14dB vowel + 250ms silence
+    sr_in = 24000
+    pcm = bytearray(b"\x00\x00" * int(sr_in * 0.25))
+    for i in range(int(sr_in * 0.05)):
+        pcm.extend(struct.pack("<h", round(math.sin(2.0 * math.pi * 1200.0 * i / sr_in) * 0.0125 * 32767.0)))
+    for i in range(int(sr_in * 0.25)):
+        pcm.extend(struct.pack("<h", round(math.sin(2.0 * math.pi * 220.0 * i / sr_in) * 0.20 * 32767.0)))
+    pcm.extend(b"\x00\x00" * int(sr_in * 0.25))
+
+    trimmed_wav = tmp_path / "soft_onset.wav"
+    dur = normalize_tts_bytes_to_wav(bytes(pcm), "audio/L16;codec=pcm;rate=24000", trimmed_wav)
+    # 0.035 lead pad + 0.050 soft onset + 0.250 vowel + 0.045 tail pad = ~0.380s
+    assert 0.35 <= dur <= 0.44
+
+    with wave.open(str(trimmed_wav), "rb") as wf:
+        sr_out = wf.getframerate()
+        vals = struct.unpack(f"<{wf.getnframes()}h", wf.readframes(wf.getnframes()))
+
+    def _window_db(start_ms: int, end_ms: int) -> float:
+        seg = vals[int(start_ms * sr_out / 1000) : int(end_ms * sr_out / 1000)]
+        rms = math.sqrt(sum(x * x for x in seg) / max(1, len(seg))) / 32768.0
+        return 20.0 * math.log10(rms) if rms > 1e-9 else -99.0
+
+    # First 20ms is clean lead pad silence; soft onset around 40-60ms is intact before vowel
+    assert _window_db(0, 20) < -50.0
+    assert -46.0 <= _window_db(40, 65) <= -34.0
+    assert _window_db(100, 150) > -22.0
+
+    # Default lead-in (120ms) shifts beat 1 start away from 0.0s with exact digital silence
+    clip = tmp_path / "clip_48k.wav"
+    clip.write_bytes(_tone_wav_bytes(0.25, rate=48000))
+    master_padded = tmp_path / "master_padded.wav"
+    timings_padded = assemble_voice_track([(clip, 100)], master_padded)
+    assert timings_padded[0][0] == pytest.approx(0.12, abs=0.001)
+    with wave.open(str(master_padded), "rb") as wf:
+        lead_frames = wf.readframes(round(0.12 * 48000))
+        assert lead_frames == b"\x00\x00" * round(0.12 * 48000)
+
+    # Zero lead-in branch preserves start at 0.0s
+    master_unpadded = tmp_path / "master_unpadded.wav"
+    timings_unpadded = assemble_voice_track([(clip, 100)], master_unpadded, lead_in_ms=0)
+    assert timings_unpadded[0][0] == 0.0
+
+
 def test_audio_mix_lufs_sfx_music_ducking_and_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
