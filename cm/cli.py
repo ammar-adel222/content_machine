@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.request
 import webbrowser
@@ -27,12 +28,14 @@ from cm.models import (
     IdeaStatus,
     PipelineStage,
     QaReport,
+    RenderReport,
     RunState,
     StageRecord,
     StageStatus,
     TopicDomain,
 )
 from cm.paths import resolve_engine_dir, run_dir
+from cm.renderer import FrameFormat, RenderQuality, render_video
 from cm.scene import create_preview_server, resolve_preview_target, scaffold_scene
 from cm.sfx import init_sfx_pack, list_sfx_slots
 from cm.snapshot import SnapshotMode, run_snapshot
@@ -95,6 +98,7 @@ class SchemaModel(StrEnum):
     CATALOG = "catalog"
     QA = "qa"
     TIMELINE = "timeline"
+    RENDER = "render"
 
 
 def _fail(message: str, as_json: bool, code: int = 1) -> NoReturn:
@@ -326,7 +330,7 @@ def validate(
 def schema(
     model: SchemaModel = typer.Argument(
         SchemaModel.BLUEPRINT,
-        help="Schema to export: blueprint, state, catalog, qa, or timeline",
+        help="Schema to export: blueprint, state, catalog, qa, timeline, or render",
     ),
 ) -> None:
     """Print the JSON Schema for a Content Machine contract model."""
@@ -336,6 +340,7 @@ def schema(
         SchemaModel.CATALOG: Catalog,
         SchemaModel.QA: QaReport,
         SchemaModel.TIMELINE: AudioTimeline,
+        SchemaModel.RENDER: RenderReport,
     }
     typer.echo(json.dumps(model_map[model].model_json_schema(), indent=2))
 
@@ -761,6 +766,60 @@ def tts(
         f"[green][OK][/green] TTS ({timeline.provider}) for '{slug}': "
         f"{len(timeline.beats)} beats, {timeline.total_duration_sec:.2f}s ({mix_info})"
     )
+
+
+@app.command()
+def render(
+    target: str = typer.Argument(..., help="Run slug or path to a .scene.html file"),
+    quality: RenderQuality = typer.Option(
+        RenderQuality.PREVIEW, "--quality", help="Encode quality: preview or final"
+    ),
+    fps: int | None = typer.Option(None, "--fps", help="Override frames per second"),
+    workers: int = typer.Option(
+        max(1, min(4, os.cpu_count() or 2)),
+        "--workers",
+        help="Parallel Chromium worker tabs",
+    ),
+    frame_format: FrameFormat = typer.Option(
+        FrameFormat.JPEG, "--frame-format", help="Frame pipe format: jpeg or png"
+    ),
+    out: Path | None = typer.Option(None, "--out", help="Override output .mp4 path"),
+    audio: Path | None = typer.Option(None, "--audio", help="Override audio .wav path"),
+    max_duration: float | None = typer.Option(
+        None, "--max-duration", help="Clamp rendered duration in seconds (for fast checks)"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON RenderReport output"),
+) -> None:
+    """Render a scene HTML or run slug to H.264/AAC MP4 using parallel Chromium workers."""
+    try:
+        report = render_video(
+            target=target,
+            quality=quality,
+            fps=fps,
+            workers=workers,
+            frame_format=frame_format,
+            out_path=out,
+            audio_path=audio,
+            max_duration=max_duration,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+
+    summary = "\n".join(
+        [
+            f"Target:  {report.slug} ({report.format.value})",
+            f"Output:  {report.output_path}",
+            f"Video:   {report.video_codec} ({report.pix_fmt}) {report.width}x{report.height} @ {report.fps}fps",
+            f"Audio:   {report.audio_codec or 'none'} ({report.audio_source or 'silent'})",
+            f"Frames:  {report.total_frames} frames via {report.workers} worker(s) in {report.elapsed_sec:.2f}s",
+            f"Size:    {report.file_size_bytes} bytes ({report.duration_sec:.2f}s)",
+        ]
+    )
+    console.print(Panel(summary, title="Render Complete", box=box.ASCII, border_style="green"))
 
 
 if __name__ == "__main__":

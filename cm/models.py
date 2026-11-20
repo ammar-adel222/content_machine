@@ -538,3 +538,27 @@ class AudioTimeline(BaseModel):
     fallback_events: list[str] = Field(default_factory=list)
     beats: list[TimedBeatAudio] = Field(default_factory=list)
     sfx_events: list[ScheduledSfx] = Field(default_factory=list)
+
+
+class RenderReport(BaseModel):
+    """Rendered video artifact metadata at runs/<slug>/render_report.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str
+    scene_path: str
+    output_path: str
+    format: FormatPreset
+    quality: Literal["preview", "final"]
+    frame_format: Literal["jpeg", "png"]
+    width: int
+    height: int
+    fps: int
+    total_frames: int
+    workers: int
+    video_codec: str
+    pix_fmt: str
+    audio_codec: str | None = None
+    audio_source: str | None = None
+    duration_sec: float
+    file_size_bytes: int
+    elapsed_sec: float
