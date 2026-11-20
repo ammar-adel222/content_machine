@@ -1,0 +1,37 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Secrets & credentials
+.env
+.env.*
+!.env.example
+secrets/
+client_secret*.json
+*oauth*token*.json
+token.json
+
+# Generated run artifacts & heavy media
+runs/*
+!runs/.gitkeep
+assets/sfx/*.wav
+assets/sfx/*.mp3
+assets/music/*.wav
+assets/music/*.mp3
+*.mp4
+*.mov
+*.mkv
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
