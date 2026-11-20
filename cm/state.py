@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from cm.models import (
     FORMAT_SPECS,
@@ -24,14 +27,14 @@ from cm.models import (
     SystemStatus,
     TopicDomain,
 )
-from cm.paths import run_dir, runs_dir
+from cm.paths import atomic_write_text, run_dir, runs_dir
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def default_stages() -> dict[PipelineStage, StageRecord]:
     """Build initial stage checkpoint records for a new run."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         PipelineStage.IDEATE: StageRecord(status=StageStatus.PASSED, updated_at=now),
         PipelineStage.BLUEPRINT: StageRecord(
@@ -57,14 +60,14 @@ def build_starter_blueprint(
     """Create a scaffold blueprint containing explicit TODO markers to complete."""
     spec = FORMAT_SPECS[fmt]
     chain = (
-        idea.failure_chain
+        list(idea.failure_chain)
         if idea is not None
         else [f"Failure mode {idx}" for idx in range(1, spec.min_iterations + 1)]
     )
     if len(chain) < spec.min_iterations:
-        chain = chain + [
+        chain.extend(
             f"Failure mode {idx}" for idx in range(len(chain) + 1, spec.min_iterations + 1)
-        ]
+        )
 
     hook_text = (
         f"TODO: Refine hook - {idea.hook}"
@@ -165,8 +168,8 @@ def build_starter_blueprint(
 def init_run(
     slug: str,
     title: str | None = None,
-    topic_domain: TopicDomain = TopicDomain.CS,
-    fmt: FormatPreset = FormatPreset.SHORT_9X16,
+    topic_domain: TopicDomain | None = None,
+    fmt: FormatPreset | None = None,
     from_blueprint: Path | None = None,
     idea: IdeaEntry | None = None,
     force: bool = False,
@@ -182,45 +185,50 @@ def init_run(
     if rdir.exists() and not force:
         raise FileExistsError(f"Run '{slug}' already exists at {rdir}")
 
-    bp_raw_text: str | None = None
-    resolved_title = title
-    resolved_domain = topic_domain
-    resolved_fmt = fmt
+    bp_text_to_write: str | None = None
+    parsed_title: str | None = None
+    parsed_domain: TopicDomain | None = None
+    parsed_fmt: FormatPreset | None = None
 
     if from_blueprint is not None:
         if not from_blueprint.is_file():
             raise FileNotFoundError(f"Source blueprint not found: {from_blueprint}")
-        bp_raw_text = from_blueprint.read_text(encoding="utf-8")
+        raw_text = from_blueprint.read_text(encoding="utf-8")
         try:
-            parsed = json.loads(bp_raw_text)
-            if isinstance(parsed, dict):
-                if resolved_title is None and isinstance(parsed.get("title"), str):
-                    resolved_title = parsed["title"]
-                if isinstance(parsed.get("topic_domain"), str):
-                    try:
-                        resolved_domain = TopicDomain(parsed["topic_domain"])
-                    except ValueError:
-                        pass
-                if isinstance(parsed.get("format"), str):
-                    try:
-                        resolved_fmt = FormatPreset(parsed["format"])
-                    except ValueError:
-                        pass
+            parsed = json.loads(raw_text)
         except json.JSONDecodeError:
-            pass
+            parsed = None
 
-    if resolved_title is None:
-        if idea is not None:
-            resolved_title = idea.title
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("title"), str) and parsed["title"].strip():
+                parsed_title = parsed["title"].strip()
+            if isinstance(parsed.get("topic_domain"), str):
+                with contextlib.suppress(ValueError):
+                    parsed_domain = TopicDomain(parsed["topic_domain"])
+            if isinstance(parsed.get("format"), str):
+                with contextlib.suppress(ValueError):
+                    parsed_fmt = FormatPreset(parsed["format"])
+            parsed["slug"] = slug
+            bp_text_to_write = json.dumps(parsed, indent=2) + "\n"
         else:
-            resolved_title = slug.replace("-", " ").title()
+            bp_text_to_write = raw_text
+
+    resolved_domain = topic_domain or parsed_domain or (
+        idea.topic_domain if idea is not None else TopicDomain.CS
+    )
+    resolved_fmt = fmt or parsed_fmt or (
+        idea.format if idea is not None else FormatPreset.SHORT_9X16
+    )
+    resolved_title = title or parsed_title or (
+        idea.title if idea is not None else slug.replace("-", " ").title()
+    )
 
     for sub in ("audio", "qa", "render"):
         (rdir / sub).mkdir(parents=True, exist_ok=True)
 
     bp_path = rdir / "blueprint.json"
-    if bp_raw_text is not None:
-        bp_path.write_text(bp_raw_text, encoding="utf-8")
+    if bp_text_to_write is not None:
+        atomic_write_text(bp_path, bp_text_to_write)
     else:
         starter = build_starter_blueprint(
             slug=slug,
@@ -229,9 +237,9 @@ def init_run(
             fmt=resolved_fmt,
             idea=idea,
         )
-        bp_path.write_text(starter.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(bp_path, starter.model_dump_json(indent=2) + "\n")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     state = RunState(
         slug=slug,
         title=resolved_title,
@@ -252,16 +260,17 @@ def load_state(slug: str, root: Path | None = None) -> RunState:
     state_file = run_dir(slug, root) / "state.json"
     if not state_file.is_file():
         raise FileNotFoundError(f"Run '{slug}' not found (missing {state_file})")
-    return RunState.model_validate_json(state_file.read_text(encoding="utf-8"))
+    try:
+        return RunState.model_validate_json(state_file.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, ValidationError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Corrupt state file for run '{slug}' at {state_file}: {exc}") from exc
 
 
 def save_state(state: RunState, root: Path | None = None) -> Path:
-    """Persist RunState to runs/<slug>/state.json."""
-    state.updated_at = datetime.now(timezone.utc)
+    """Persist RunState atomically to runs/<slug>/state.json."""
+    state.updated_at = datetime.now(UTC)
     state_file = run_dir(state.slug, root) / "state.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    return state_file
+    return atomic_write_text(state_file, state.model_dump_json(indent=2) + "\n")
 
 
 def update_stage(
@@ -275,7 +284,7 @@ def update_stage(
 ) -> RunState:
     """Update a stage checkpoint and advance current_stage on pass."""
     state = load_state(slug, root)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     record = state.stages.get(stage, StageRecord())
     record.status = status
     record.updated_at = now
@@ -285,10 +294,9 @@ def update_stage(
 
     if status == StageStatus.PASSED and advance_on_pass:
         idx = PIPELINE_ORDER.index(stage)
-        if idx + 1 < len(PIPELINE_ORDER):
-            state.current_stage = PIPELINE_ORDER[idx + 1]
-        else:
-            state.current_stage = stage
+        state.current_stage = (
+            PIPELINE_ORDER[idx + 1] if idx + 1 < len(PIPELINE_ORDER) else stage
+        )
     elif status in (StageStatus.FAILED, StageStatus.IN_PROGRESS):
         state.current_stage = stage
 
@@ -296,18 +304,28 @@ def update_stage(
     return state
 
 
-def list_runs(root: Path | None = None) -> list[RunState]:
-    """Return all runs under runs/ sorted by updated_at descending."""
+def list_runs_checked(root: Path | None = None) -> tuple[list[RunState], list[str]]:
+    """Return valid runs sorted by updated_at descending plus any corrupt-run error strings."""
     rdir = runs_dir(root)
     if not rdir.is_dir():
-        return []
+        return [], []
 
     runs: list[RunState] = []
-    for child in rdir.iterdir():
+    errors: list[str] = []
+    for child in sorted(rdir.iterdir()):
         if child.is_dir() and (child / "state.json").is_file():
-            runs.append(RunState.model_validate_json((child / "state.json").read_text(encoding="utf-8")))
+            try:
+                runs.append(load_state(child.name, root))
+            except ValueError as exc:
+                errors.append(str(exc))
 
     runs.sort(key=lambda item: item.updated_at, reverse=True)
+    return runs, errors
+
+
+def list_runs(root: Path | None = None) -> list[RunState]:
+    """Return all valid runs under runs/ sorted by updated_at descending."""
+    runs, _ = list_runs_checked(root)
     return runs
 
 

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import NoReturn
 
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -26,7 +27,13 @@ from cm.models import (
     TopicDomain,
 )
 from cm.paths import run_dir
-from cm.state import compute_next_action, init_run, list_runs, load_state, update_stage
+from cm.state import (
+    compute_next_action,
+    init_run,
+    list_runs_checked,
+    load_state,
+    update_stage,
+)
 from cm.validators import validate_blueprint_file
 
 app = typer.Typer(
@@ -52,7 +59,7 @@ STATUS_ICONS: dict[StageStatus, str] = {
 }
 
 
-class SchemaModel(str, Enum):
+class SchemaModel(StrEnum):
     """Exportable JSON Schema model names."""
 
     BLUEPRINT = "blueprint"
@@ -72,8 +79,12 @@ def _fail(message: str, as_json: bool, code: int = 1) -> NoReturn:
 def new(
     slug: str = typer.Argument(..., help="Lowercase kebab-case run identifier (e.g. password-system)"),
     title: str | None = typer.Option(None, "--title", help="Video title"),
-    fmt: FormatPreset = typer.Option(FormatPreset.SHORT_9X16, "--format", help="Video format preset"),
-    domain: TopicDomain = typer.Option(TopicDomain.CS, "--domain", help="Topic domain"),
+    fmt: FormatPreset | None = typer.Option(
+        None, "--format", help="Video format preset (defaults to source blueprint or short_9x16)"
+    ),
+    domain: TopicDomain | None = typer.Option(
+        None, "--domain", help="Topic domain (defaults to source blueprint or cs)"
+    ),
     from_blueprint: Path | None = typer.Option(
         None, "--from-blueprint", help="Copy an existing blueprint JSON file into the run"
     ),
@@ -90,7 +101,7 @@ def new(
             from_blueprint=from_blueprint,
             force=force,
         )
-    except (ValueError, FileExistsError, FileNotFoundError) as exc:
+    except (ValueError, FileExistsError, FileNotFoundError, UnicodeDecodeError) as exc:
         _fail(str(exc), as_json)
 
     next_action = compute_next_action(state)
@@ -116,7 +127,7 @@ def status(
 ) -> None:
     """Show status of all runs or detailed checkpoint state for a single run."""
     if slug is None:
-        runs = list_runs()
+        runs, corrupt_errors = list_runs_checked()
         if as_json:
             payload = {
                 "runs": [
@@ -130,35 +141,40 @@ def status(
                         "next_action": compute_next_action(r),
                     }
                     for r in runs
-                ]
+                ],
+                "errors": corrupt_errors,
             }
             typer.echo(json.dumps(payload, indent=2))
             return
 
-        if not runs:
+        if not runs and not corrupt_errors:
             console.print("[dim]No runs found in runs/. Start one with: cm new <slug>[/dim]")
             return
 
-        table = Table(title="Content Machine 3.0 Runs")
-        table.add_column("Slug", style="bold")
-        table.add_column("Title")
-        table.add_column("Format")
-        table.add_column("Stage")
-        table.add_column("Next Action")
-        for r in runs:
-            table.add_row(
-                r.slug,
-                r.title,
-                r.format.value,
-                r.current_stage.value,
-                compute_next_action(r),
-            )
-        console.print(table)
+        if runs:
+            table = Table(title="Content Machine 3.0 Runs", box=box.ASCII)
+            table.add_column("Slug", style="bold")
+            table.add_column("Title")
+            table.add_column("Format")
+            table.add_column("Stage")
+            table.add_column("Next Action")
+            for r in runs:
+                table.add_row(
+                    r.slug,
+                    r.title,
+                    r.format.value,
+                    r.current_stage.value,
+                    compute_next_action(r),
+                )
+            console.print(table)
+
+        for err in corrupt_errors:
+            console.print(f"[yellow][WARN][/yellow] {err}")
         return
 
     try:
         state = load_state(slug)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         _fail(str(exc), as_json)
 
     next_action = compute_next_action(state)
@@ -168,7 +184,7 @@ def status(
         typer.echo(json.dumps(payload, indent=2))
         return
 
-    table = Table(title=f"Run: {state.slug} ({state.title})")
+    table = Table(title=f"Run: {state.slug} ({state.title})", box=box.ASCII)
     table.add_column("State", width=6)
     table.add_column("Stage", style="bold")
     table.add_column("Status")
@@ -185,7 +201,7 @@ def status(
             rec.notes or "",
         )
     console.print(table)
-    console.print(Panel(next_action, title="Next Action", border_style="cyan"))
+    console.print(Panel(next_action, title="Next Action", border_style="cyan", box=box.ASCII))
 
 
 @app.command()
@@ -195,6 +211,9 @@ def validate(
 ) -> None:
     """Validate a blueprint against Pydantic contracts and retention rules."""
     candidate = Path(target)
+    if candidate.is_dir():
+        _fail(f"Expected a blueprint JSON file or run slug, got directory: {target}", as_json)
+
     is_file_target = (
         candidate.is_file()
         or target.lower().endswith(".json")
@@ -211,8 +230,16 @@ def validate(
     else:
         bp_path = candidate
 
-    catalog = load_catalog()
-    report = validate_blueprint_file(bp_path, catalog=catalog)
+    try:
+        catalog = load_catalog()
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
+    report = validate_blueprint_file(
+        bp_path,
+        catalog=catalog,
+        expected_slug=target if slug_mode else None,
+    )
 
     if slug_mode:
         notes = (
@@ -221,13 +248,16 @@ def validate(
             if report.passed and report.metrics is not None
             else f"{len(report.errors)} validation error(s)"
         )
-        update_stage(
-            slug=target,
-            stage=PipelineStage.BLUEPRINT,
-            status=StageStatus.PASSED if report.passed else StageStatus.FAILED,
-            notes=notes,
-            error_count=len(report.errors),
-        )
+        try:
+            update_stage(
+                slug=target,
+                stage=PipelineStage.BLUEPRINT,
+                status=StageStatus.PASSED if report.passed else StageStatus.FAILED,
+                notes=notes,
+                error_count=len(report.errors),
+            )
+        except ValueError as exc:
+            _fail(str(exc), as_json)
 
     if as_json:
         typer.echo(report.model_dump_json(indent=2))
@@ -237,7 +267,7 @@ def validate(
 
     badge = "[green][PASS][/green]" if report.passed else "[red][FAIL][/red]"
     console.print(
-        f"{badge} {report.target} — {len(report.errors)} error(s), {len(report.warnings)} warning(s)"
+        f"{badge} {report.target} - {len(report.errors)} error(s), {len(report.warnings)} warning(s)"
     )
 
     if report.metrics is not None:
@@ -294,15 +324,16 @@ def ideas_add(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
 ) -> None:
     """Add a CS/AI Build->Fail->Upgrade concept to channels/catalog.json."""
-    if len(failure) < 3:
-        _fail("At least 3 --failure steps are required for a Build->Fail->Upgrade chain.", as_json)
+    cleaned_failures = [step.strip() for step in failure if step.strip()]
+    if len(cleaned_failures) < 3 or len(cleaned_failures) != len(failure):
+        _fail("At least 3 non-empty --failure steps are required for a Build->Fail->Upgrade chain.", as_json)
 
     try:
         entry, warnings = add_idea(
             title=title,
             topic_domain=domain,
             hook=hook,
-            failure_chain=failure,
+            failure_chain=cleaned_failures,
             slug=slug,
             fmt=fmt,
             score=score,
@@ -329,7 +360,11 @@ def ideas_list(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
 ) -> None:
     """List ideas stored in channels/catalog.json."""
-    catalog = load_catalog()
+    try:
+        catalog = load_catalog()
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
     items = catalog.ideas
     if status is not None:
         items = [i for i in items if i.status == status]
@@ -344,7 +379,7 @@ def ideas_list(
         console.print("[dim]No matching ideas in channels/catalog.json.[/dim]")
         return
 
-    table = Table(title="Channel Idea Backlog")
+    table = Table(title="Channel Idea Backlog", box=box.ASCII)
     table.add_column("ID", style="bold")
     table.add_column("Slug")
     table.add_column("Domain")
@@ -370,7 +405,11 @@ def ideas_pick(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
 ) -> None:
     """Create a run workspace from an idea backlog entry and mark it in_progress."""
-    catalog = load_catalog()
+    try:
+        catalog = load_catalog()
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
     idea = find_idea(catalog, ref)
     if idea is None:
         _fail(f"Idea '{ref}' not found in channels/catalog.json", as_json)

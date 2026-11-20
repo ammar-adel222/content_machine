@@ -29,22 +29,24 @@ BANNED_OPENERS = re.compile(
 )
 
 TODO_PATTERN = re.compile(r"\bTODO\b")
+SENTENCE_SPLIT = re.compile(r"(?:[.!?](?:\s+|$))+")
 STATIC_DIFF_VALUES = frozenset({"", "none", "n/a", "same", "unchanged", "no change"})
 
 
 def estimate_beat_duration(beat: Beat, target_wpm: int) -> float:
     """Estimate beat duration in seconds from narration word count and pause."""
     if beat.estimated_duration_sec is not None:
-        return round(float(beat.estimated_duration_sec), 2)
+        return float(beat.estimated_duration_sec)
     words = len(beat.narration.split())
     speech_sec = max(1.0, words / (target_wpm / 60.0))
-    return round(speech_sec + (beat.pause_after_ms / 1000.0), 2)
+    return speech_sec + (beat.pause_after_ms / 1000.0)
 
 
 def validate_blueprint_data(
     blueprint: Blueprint,
     target: str,
     catalog: Catalog | None = None,
+    expected_slug: str | None = None,
 ) -> ValidationReport:
     """Run structural, retention, pacing, and visual-diff checks on a Blueprint."""
     spec = FORMAT_SPECS[blueprint.format]
@@ -73,6 +75,13 @@ def validate_blueprint_data(
             )
         )
 
+    if expected_slug is not None and blueprint.slug != expected_slug:
+        add_error(
+            "SLUG_MISMATCH",
+            f"Blueprint slug '{blueprint.slug}' does not match run slug '{expected_slug}'.",
+            f"Update 'slug' inside blueprint.json to '{expected_slug}'.",
+        )
+
     if TODO_PATTERN.search(blueprint.core_premise) or TODO_PATTERN.search(
         blueprint.persistent_subject
     ):
@@ -84,6 +93,7 @@ def validate_blueprint_data(
 
     beats = blueprint.beats
     seen_ids: set[str] = set()
+    seen_versions: set[str] = set()
     beat_durations: list[float] = []
 
     if beats[0].kind != BeatKind.HOOK:
@@ -120,6 +130,7 @@ def validate_blueprint_data(
 
     iteration_count = 0
     pending_fail = False
+    last_fail_id: str | None = None
     version_progression: list[str] = []
 
     for idx, beat in enumerate(beats):
@@ -194,7 +205,7 @@ def validate_blueprint_data(
                 beat_id=beat.id,
             )
 
-        for sentence in re.split(r"[.!?]+", beat.narration):
+        for sentence in SENTENCE_SPLIT.split(beat.narration):
             words_in_sentence = len(sentence.split())
             if words_in_sentence > 28:
                 add_warning(
@@ -222,6 +233,7 @@ def validate_blueprint_data(
 
         if beat.kind == BeatKind.FAIL:
             pending_fail = True
+            last_fail_id = beat.id
             stamp = (beat.failure_stamp or "").strip()
             if not stamp or len(stamp) > 28:
                 add_error(
@@ -261,6 +273,7 @@ def validate_blueprint_data(
             if pending_fail:
                 iteration_count += 1
                 pending_fail = False
+                last_fail_id = None
 
             if beat.system_status not in (SystemStatus.UPGRADED, SystemStatus.RESILIENT):
                 add_error(
@@ -270,11 +283,20 @@ def validate_blueprint_data(
                     beat_id=beat.id,
                 )
 
-            if idx > 0 and beat.version_label.strip().lower() == beats[idx - 1].version_label.strip().lower():
+            ver_norm = beat.version_label.strip().lower()
+            prev_ver_norm = beats[idx - 1].version_label.strip().lower() if idx > 0 else ""
+            if idx > 0 and ver_norm == prev_ver_norm:
                 add_error(
                     "UPGRADE_VERSION_NOT_INCREMENTED",
                     f"Upgrade beat '{beat.id}' keeps version_label '{beat.version_label}'.",
                     "Increment version_label (e.g. v1.0 -> v2.0) when upgrading.",
+                    beat_id=beat.id,
+                )
+            elif ver_norm in seen_versions:
+                add_error(
+                    "UPGRADE_VERSION_REGRESSION",
+                    f"Upgrade beat '{beat.id}' reuses earlier version_label '{beat.version_label}'.",
+                    "Advance to a fresh higher version_label (e.g. v2.0 -> v3.0).",
                     beat_id=beat.id,
                 )
 
@@ -286,6 +308,16 @@ def validate_blueprint_data(
                     beat_id=beat.id,
                 )
 
+        seen_versions.add(beat.version_label.strip().lower())
+
+    if pending_fail:
+        add_error(
+            "UNRESOLVED_FAIL",
+            f"Fail beat '{last_fail_id}' is not resolved by a subsequent 'upgrade' beat.",
+            "Add an 'upgrade' beat resolving the failure before the final payoff.",
+            beat_id=last_fail_id,
+        )
+
     if iteration_count < spec.min_iterations:
         add_error(
             "STRUCTURE_TOO_FEW_ITERATIONS",
@@ -293,7 +325,7 @@ def validate_blueprint_data(
             f"Include at least {spec.min_iterations} distinct fail -> upgrade cycles.",
         )
 
-    total_duration = round(sum(beat_durations), 2)
+    total_duration = round(sum(beat_durations), 4)
     if total_duration < spec.hard_min_duration_sec or total_duration > spec.hard_max_duration_sec:
         add_error(
             "DURATION_OUT_OF_RANGE",
@@ -327,7 +359,7 @@ def validate_blueprint_data(
     metrics = BlueprintMetrics(
         beat_count=len(beats),
         total_words=sum(len(b.narration.split()) for b in beats),
-        estimated_duration_sec=total_duration,
+        estimated_duration_sec=round(total_duration, 2),
         hook_duration_sec=round(beat_durations[0], 2),
         iteration_count=iteration_count,
         version_progression=version_progression,
@@ -346,6 +378,7 @@ def validate_blueprint_data(
 def validate_blueprint_file(
     path: Path,
     catalog: Catalog | None = None,
+    expected_slug: str | None = None,
 ) -> ValidationReport:
     """Load, schema-validate, and lint a blueprint JSON file without raising raw tracebacks."""
     target = str(path)
@@ -365,7 +398,24 @@ def validate_blueprint_file(
         )
 
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return ValidationReport(
+            passed=False,
+            target=target,
+            errors=[
+                LintIssue(
+                    code="INVALID_ENCODING",
+                    severity="error",
+                    message=f"File is not valid UTF-8 text: {exc}",
+                    suggestion="Save the blueprint file encoded as UTF-8.",
+                )
+            ],
+            warnings=[],
+        )
+
+    try:
+        raw = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         return ValidationReport(
             passed=False,
@@ -400,4 +450,9 @@ def validate_blueprint_file(
             warnings=[],
         )
 
-    return validate_blueprint_data(blueprint, target=target, catalog=catalog)
+    return validate_blueprint_data(
+        blueprint,
+        target=target,
+        catalog=catalog,
+        expected_slug=expected_slug,
+    )

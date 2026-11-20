@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from cm.models import Catalog, FormatPreset, IdeaEntry, IdeaStatus, TopicDomain
-from cm.paths import catalog_path
+from cm.paths import atomic_write_text, catalog_path
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -66,15 +69,15 @@ def load_catalog(root: Path | None = None) -> Catalog:
         catalog = Catalog()
         save_catalog(catalog, root)
         return catalog
-    return Catalog.model_validate_json(path.read_text(encoding="utf-8"))
+    try:
+        return Catalog.model_validate_json(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError) as exc:
+        raise ValueError(f"Corrupt catalog file at {path}: {exc}") from exc
 
 
 def save_catalog(catalog: Catalog, root: Path | None = None) -> Path:
     """Persist the catalog atomically to channels/catalog.json."""
-    path = catalog_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(catalog.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    return path
+    return atomic_write_text(catalog_path(root), catalog.model_dump_json(indent=2) + "\n")
 
 
 def find_duplicates(
@@ -145,6 +148,10 @@ def add_idea(
     if any(p.slug == final_slug for p in catalog.published):
         raise ValueError(f"Slug '{final_slug}' already exists in published catalog")
 
+    cleaned_chain = [step.strip() for step in failure_chain]
+    if len(cleaned_chain) < 3 or any(not step for step in cleaned_chain):
+        raise ValueError("failure_chain requires at least 3 non-empty steps")
+
     warnings = find_duplicates(title, final_slug, catalog)
 
     entry = IdeaEntry(
@@ -154,10 +161,10 @@ def add_idea(
         topic_domain=topic_domain,
         format=fmt,
         hook=hook.strip(),
-        failure_chain=[step.strip() for step in failure_chain if step.strip()],
+        failure_chain=cleaned_chain,
         score=score,
         status=IdeaStatus.BACKLOG,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     catalog.ideas.append(entry)
     save_catalog(catalog, root)

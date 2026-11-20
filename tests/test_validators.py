@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cm.models import (
-    BeatKind,
     Blueprint,
     Catalog,
     FormatPreset,
@@ -157,7 +156,7 @@ def test_warnings_for_dense_sentence_missing_sfx_and_duplicate_topic() -> None:
                 title="Building a Password System From Scratch",
                 topic_domain=TopicDomain.SECURITY,
                 format=FormatPreset.SHORT_9X16,
-                published_at=datetime.now(timezone.utc),
+                published_at=datetime.now(UTC),
                 keywords=["password", "hashing", "argon2"],
             )
         ]

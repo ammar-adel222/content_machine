@@ -1,8 +1,9 @@
-"""Workspace path resolution for Content Machine 3.0."""
+"""Workspace path resolution and atomic file utilities for Content Machine 3.0."""
 
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -18,6 +19,30 @@ def get_repo_root() -> Path:
             return candidate
 
     return Path(__file__).resolve().parent.parent
+
+
+def atomic_write_text(path: Path, content: str) -> Path:
+    """Atomically write UTF-8 text via a same-directory temp file and os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 def runs_dir(root: Path | None = None) -> Path:

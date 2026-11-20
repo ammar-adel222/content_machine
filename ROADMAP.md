@@ -2,6 +2,16 @@
 
 Each milestone is designed to be verifiable on its own and committed/pushed upon completion.
 
+## Permanent Testing & Quality Gate
+
+Every milestone and change must satisfy these non-negotiable checks before committing and pushing:
+
+- **Lint & static hygiene:** `ruff check cm tests` (`0` errors)
+- **Exhaustive tests & branch coverage:** `pytest --cov=cm --cov-branch --cov-fail-under=95` (all boundary, corruption, negative, and integration tests passing)
+- **Cross-platform CI:** Every push to `main` runs the full suite and CLI smoke check on both Linux and Windows via [ci.yml](./.github/workflows/ci.yml).
+
+## Milestones
+
 1. **Milestone 1 — Core Harness Skeleton & Blueprint Validator**
    - Python 3.13 `.venv`, `pyproject.toml` (`cm` CLI), file-backed state machine (`runs/<slug>/state.json`), and `channels/catalog.json`.
    - Pydantic schema & retention linter (`cm new`, `cm status`, `cm validate`) enforcing Hook + Build → Stress-Test → Fail → Upgrade chains.

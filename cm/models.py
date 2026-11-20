@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 
-class FormatPreset(str, Enum):
+def _clean_non_empty(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("Field cannot be blank")
+    return cleaned
+
+
+def _clean_single_line(value: str) -> str:
+    cleaned = _clean_non_empty(value)
+    if "\n" in cleaned or "\r" in cleaned:
+        raise ValueError("Field must be a single line without newlines")
+    return cleaned
+
+
+class FormatPreset(StrEnum):
     """Supported video aspect ratios and pacing targets."""
 
     SHORT_9X16 = "short_9x16"
@@ -77,7 +91,7 @@ FORMAT_SPECS: dict[FormatPreset, FormatSpec] = {
 }
 
 
-class TopicDomain(str, Enum):
+class TopicDomain(StrEnum):
     """Core CS and AI subject categories."""
 
     CS = "cs"
@@ -88,7 +102,7 @@ class TopicDomain(str, Enum):
     DATABASES = "databases"
 
 
-class SfxCue(str, Enum):
+class SfxCue(StrEnum):
     """Semantic sound-effect slots resolved by assets/sfx/manifest.json."""
 
     POP_BUILD = "pop_build"
@@ -112,21 +126,24 @@ class SfxTrigger(BaseModel):
     at: Literal["start", "mid", "end"] | float = "start"
     gain_db: float = Field(default=-12.0, ge=-30.0, le=0.0)
 
+    @field_validator("at", mode="before")
+    @classmethod
+    def reject_bool_at(cls, value: object) -> object:
+        """Reject booleans before Pydantic coerces True/False to float 1.0/0.0."""
+        if isinstance(value, bool):
+            raise ValueError("'at' cannot be a boolean")
+        return value
+
     @field_validator("at")
     @classmethod
     def validate_at(cls, value: str | float) -> str | float:
         """Ensure fractional offsets lie within [0.0, 1.0]."""
-        if isinstance(value, bool):
-            raise ValueError("'at' cannot be a boolean")
-        if isinstance(value, (int, float)):
-            fval = float(value)
-            if not 0.0 <= fval <= 1.0:
-                raise ValueError("Numeric 'at' offset must be between 0.0 and 1.0")
-            return fval
+        if isinstance(value, float) and not 0.0 <= value <= 1.0:
+            raise ValueError("Numeric 'at' offset must be between 0.0 and 1.0")
         return value
 
 
-class BeatKind(str, Enum):
+class BeatKind(StrEnum):
     """Narrative role of a beat in the Build -> Stress-Test -> Fail -> Upgrade loop."""
 
     HOOK = "hook"
@@ -137,7 +154,7 @@ class BeatKind(str, Enum):
     PAYOFF = "payoff"
 
 
-class SystemStatus(str, Enum):
+class SystemStatus(StrEnum):
     """HUD status indicator displayed on the persistent system diagram."""
 
     INITIALIZING = "initializing"
@@ -156,6 +173,12 @@ class MetricCallout(BaseModel):
     value: str = Field(min_length=1, max_length=24)
     severity: Literal["neutral", "warn", "danger", "good"] = "neutral"
 
+    @field_validator("label", "value")
+    @classmethod
+    def validate_single_line(cls, value: str) -> str:
+        """Strip whitespace and disallow blank or multiline metric strings."""
+        return _clean_single_line(value)
+
 
 class VoiceSettings(BaseModel):
     """Gemini TTS voice parameters and pacing rate."""
@@ -163,6 +186,12 @@ class VoiceSettings(BaseModel):
     voice_name: str = Field(default="Charon", min_length=1)
     style_prompt: str | None = None
     target_wpm: int = Field(default=165, ge=120, le=220)
+
+    @field_validator("voice_name")
+    @classmethod
+    def validate_voice_name(cls, value: str) -> str:
+        """Ensure voice_name is non-blank and single-line."""
+        return _clean_single_line(value)
 
 
 class Beat(BaseModel):
@@ -183,19 +212,29 @@ class Beat(BaseModel):
     sfx: list[SfxTrigger] = Field(default_factory=list)
     estimated_duration_sec: float | None = Field(default=None, gt=0.0)
 
-    @field_validator(
-        "version_label",
-        "narration",
-        "on_screen_headline",
-        "visual_state",
-        "visual_diff",
-    )
+    @field_validator("version_label", "on_screen_headline")
+    @classmethod
+    def validate_single_line_text(cls, value: str) -> str:
+        """Strip whitespace and enforce non-empty single-line HUD fields."""
+        return _clean_single_line(value)
+
+    @field_validator("narration", "visual_state", "visual_diff")
     @classmethod
     def require_non_empty_text(cls, value: str) -> str:
         """Strip whitespace and reject blank strings."""
+        return _clean_non_empty(value)
+
+    @field_validator("failure_stamp")
+    @classmethod
+    def validate_failure_stamp(cls, value: str | None) -> str | None:
+        """Normalize blank failure stamps to None and disallow multiline stamps."""
+        if value is None:
+            return None
         cleaned = value.strip()
         if not cleaned:
-            raise ValueError("Field cannot be blank")
+            return None
+        if "\n" in cleaned or "\r" in cleaned:
+            raise ValueError("failure_stamp must be a single line without newlines")
         return cleaned
 
 
@@ -213,8 +252,20 @@ class Blueprint(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     beats: list[Beat] = Field(min_length=4)
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        """Ensure title is single-line and non-blank."""
+        return _clean_single_line(value)
 
-class PipelineStage(str, Enum):
+    @field_validator("core_premise", "persistent_subject", "target_audience")
+    @classmethod
+    def validate_prose_fields(cls, value: str) -> str:
+        """Ensure descriptive blueprint fields are non-blank."""
+        return _clean_non_empty(value)
+
+
+class PipelineStage(StrEnum):
     """Ordered production stages for a single run."""
 
     IDEATE = "ideate"
@@ -237,7 +288,7 @@ PIPELINE_ORDER: tuple[PipelineStage, ...] = (
 )
 
 
-class StageStatus(str, Enum):
+class StageStatus(StrEnum):
     """Execution status of an individual pipeline stage."""
 
     PENDING = "pending"
@@ -271,8 +322,14 @@ class RunState(BaseModel):
     current_stage: PipelineStage = PipelineStage.BLUEPRINT
     stages: dict[PipelineStage, StageRecord]
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        """Ensure run title is single-line and non-blank."""
+        return _clean_single_line(value)
 
-class IdeaStatus(str, Enum):
+
+class IdeaStatus(StrEnum):
     """Lifecycle status of an idea in channels/catalog.json."""
 
     BACKLOG = "backlog"
@@ -295,6 +352,24 @@ class IdeaEntry(BaseModel):
     status: IdeaStatus = IdeaStatus.BACKLOG
     created_at: datetime
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        """Ensure idea title is single-line and non-blank."""
+        return _clean_single_line(value)
+
+    @field_validator("hook")
+    @classmethod
+    def validate_hook(cls, value: str) -> str:
+        """Ensure hook is non-blank."""
+        return _clean_non_empty(value)
+
+    @field_validator("failure_chain")
+    @classmethod
+    def validate_failure_chain(cls, value: list[str]) -> list[str]:
+        """Strip each failure step and reject blank items."""
+        return [_clean_non_empty(step) for step in value]
+
 
 class PublishedEntry(BaseModel):
     """Receipt of a published video stored for history and deduplication."""
@@ -306,6 +381,12 @@ class PublishedEntry(BaseModel):
     published_at: datetime
     platforms: dict[str, dict[str, str]] = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        """Ensure published title is single-line and non-blank."""
+        return _clean_single_line(value)
 
 
 class Catalog(BaseModel):
