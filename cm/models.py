@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -562,3 +562,79 @@ class RenderReport(BaseModel):
     duration_sec: float
     file_size_bytes: int
     elapsed_sec: float
+
+
+class CompetitorVideo(BaseModel):
+    """Normalized competitor YouTube video / Short record with performance ratios."""
+
+    video_id: str
+    url: str
+    title: str
+    channel_id: str
+    channel_title: str
+    published_at: datetime
+    duration_sec: int = Field(ge=0)
+    is_short: bool = True
+    view_count: int = Field(default=0, ge=0)
+    like_count: int = Field(default=0, ge=0)
+    comment_count: int = Field(default=0, ge=0)
+    subscriber_count: int | None = Field(default=None, ge=0)
+    outlier_score: float | None = None
+    views_per_day: float = 0.0
+    engagement_rate: float = 0.0
+    hook_transcript: str | None = None
+    title_pattern: str = "statement"
+    query: str = ""
+
+
+class FormatPatternSummary(BaseModel):
+    """Aggregated format, pacing, and hook patterns observed across researched videos."""
+
+    sample_size: int = 0
+    median_views: int = 0
+    median_duration_sec: float = 0.0
+    sweet_spot_duration_sec: tuple[int, int] | None = None
+    top_title_patterns: list[str] = Field(default_factory=list)
+    top_hook_openers: list[str] = Field(default_factory=list)
+    takeaways: list[str] = Field(default_factory=list)
+
+
+class TrendSignal(BaseModel):
+    """Audience curiosity or demand signal from zero-key search/community feeds."""
+
+    source: Literal[
+        "youtube_autocomplete",
+        "google_autocomplete",
+        "hackernews",
+        "reddit_eli5",
+    ]
+    seed: str
+    title: str
+    url: str | None = None
+    score: int | None = None
+    comments: int | None = None
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ResearchSnapshot(BaseModel):
+    """Point-in-time output from cm research youtube or cm research trends."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    kind: Literal["youtube", "trends"]
+    queries: list[str] = Field(default_factory=list)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    videos: list[CompetitorVideo] = Field(default_factory=list)
+    trends: list[TrendSignal] = Field(default_factory=list)
+    format_summary: FormatPatternSummary | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchPlaybook(BaseModel):
+    """Persistent research intelligence & learned format playbook at channels/research.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    videos: list[CompetitorVideo] = Field(default_factory=list)
+    trends: list[TrendSignal] = Field(default_factory=list)
+    learned_insights: list[str] = Field(default_factory=list)
+    format_summary: FormatPatternSummary = Field(default_factory=FormatPatternSummary)

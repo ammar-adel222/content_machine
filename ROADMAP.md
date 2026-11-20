@@ -21,18 +21,18 @@ Every milestone and change must satisfy these non-negotiable checks before commi
    - `tokens.css` (`short_9x16` + future `long_16x9` safe-zone presets).
    - `primitives.js` (CS/AI nodes, animated packet flows, load/latency gauges, version HUD, breach stamps + camera shake, synced kinetic captions).
 
-3. **Milestone 3 — Visual QA & Safe-Zone Snapshotter (`cm snapshot`)**
+3. **[DONE] Milestone 3 — Visual QA & Safe-Zone Snapshotter (`cm snapshot`)**
    - Headless Chromium (Playwright) keyframe capture per beat + contact sheet grid.
    - Automated DOM audit checking text legibility (`>= 28px`), YouTube Shorts / IG Reels UI safe-zone collisions, clipping, and beat-to-beat visual change.
 
-4. **Milestone 4 — Gemini TTS, Procedural SFX & Audio Mastering (`cm tts`, `cm sfx`, `cm audio`)**
+4. **[DONE] Milestone 4 — Gemini TTS, Procedural SFX & Audio Mastering (`cm tts`, `cm sfx`, `cm audio`)**
    - Per-beat Gemini TTS (`google-genai`) with SHA-256 caching + offline mock TTS mode for testing, outputting exact `timeline.json` beat boundaries.
    - Semantic SFX registry + procedural WAV generator (`cm sfx init`), FFmpeg SFX mixing + music auto-ducking + `-14 LUFS` normalization.
 
-5. **Milestone 5 — Parallel Video Renderer (`cm render`)**
+5. **[DONE] Milestone 5 — Parallel Video Renderer (`cm render`)**
    - Parallel headless Chromium chunk capture piped into FFmpeg H.264/AAC MP4 (`1080×1920`, 30fps preview / 60fps final) muxed with mastered audio.
 
-6. **Milestone 6 — Research & YouTube Shorts Competitor Intelligence (`cm research`)** *(can be prioritized ahead of schedule)*
+6. **[DONE] Milestone 6 — Research & YouTube Shorts Competitor Intelligence (`cm research`)**
    - **YouTube Shorts Competitor & Outlier Scanner (`cm research youtube`):** Searches similar AI/CS/engineering Shorts (`<= 90s`) via YouTube Data API v3 (`search.list`, `videos.list`, `channels.list`), computes outlier score (`views / subscribers`), `views/day`, engagement rate, and extracts opening-hook transcripts so agents learn what titles, durations, and first-3-second hooks actually outperform.
    - **Zero-Key Audience Demand Feeds (`cm research trends`):** YouTube/Google Autocomplete query mining (`"how does AI..."`, `"why does..."`), Hacker News top stories, and `r/explainlikeimfive` tech curiosity feeds.
    - **Persistent Format Playbook (`channels/research.json`):** Stores competitor snapshots and learned format insights so agents refine hook and pacing patterns over time.

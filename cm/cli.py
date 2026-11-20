@@ -29,6 +29,7 @@ from cm.models import (
     PipelineStage,
     QaReport,
     RenderReport,
+    ResearchPlaybook,
     RunState,
     StageRecord,
     StageStatus,
@@ -36,6 +37,14 @@ from cm.models import (
 )
 from cm.paths import resolve_engine_dir, run_dir
 from cm.renderer import FrameFormat, RenderQuality, render_video
+from cm.research import (
+    YouTubeOrder,
+    YouTubeSort,
+    add_playbook_insight,
+    load_research_playbook,
+    research_trends,
+    research_youtube,
+)
 from cm.scene import create_preview_server, resolve_preview_target, scaffold_scene
 from cm.sfx import init_sfx_pack, list_sfx_slots
 from cm.snapshot import SnapshotMode, run_snapshot
@@ -74,10 +83,16 @@ audio_app = typer.Typer(
     help="Mix voiceover, SFX cues, and background music to -14 LUFS",
     no_args_is_help=True,
 )
+research_app = typer.Typer(
+    name="research",
+    help="Scan YouTube Shorts competitors, trend feeds, and format playbook",
+    no_args_is_help=True,
+)
 app.add_typer(ideas_app, name="ideas")
 app.add_typer(scene_app, name="scene")
 app.add_typer(sfx_app, name="sfx")
 app.add_typer(audio_app, name="audio")
+app.add_typer(research_app, name="research")
 
 console = Console()
 
@@ -99,6 +114,12 @@ class SchemaModel(StrEnum):
     QA = "qa"
     TIMELINE = "timeline"
     RENDER = "render"
+    RESEARCH = "research"
+
+
+def _ascii_safe(text: str) -> str:
+    """Replace non-ASCII characters cleanly for cp1252-safe Windows terminal display."""
+    return text.encode("ascii", "replace").decode("ascii")
 
 
 def _fail(message: str, as_json: bool, code: int = 1) -> NoReturn:
@@ -330,7 +351,7 @@ def validate(
 def schema(
     model: SchemaModel = typer.Argument(
         SchemaModel.BLUEPRINT,
-        help="Schema to export: blueprint, state, catalog, qa, timeline, or render",
+        help="Schema to export: blueprint, state, catalog, qa, timeline, render, or research",
     ),
 ) -> None:
     """Print the JSON Schema for a Content Machine contract model."""
@@ -341,6 +362,7 @@ def schema(
         SchemaModel.QA: QaReport,
         SchemaModel.TIMELINE: AudioTimeline,
         SchemaModel.RENDER: RenderReport,
+        SchemaModel.RESEARCH: ResearchPlaybook,
     }
     typer.echo(json.dumps(model_map[model].model_json_schema(), indent=2))
 
@@ -820,6 +842,185 @@ def render(
         ]
     )
     console.print(Panel(summary, title="Render Complete", box=box.ASCII, border_style="green"))
+
+
+def _print_video_research(videos: list, summary: object | None, table_title: str) -> None:
+    if videos:
+        table = Table(title=table_title, box=box.ASCII)
+        table.add_column("Outlier", justify="right", style="cyan")
+        table.add_column("Views/d", justify="right")
+        table.add_column("Views", justify="right")
+        table.add_column("Dur", justify="right")
+        table.add_column("Pattern")
+        table.add_column("Channel")
+        table.add_column("Title")
+        for v in videos:
+            outlier_txt = f"{v.outlier_score:.2f}x" if v.outlier_score is not None else "n/a"
+            table.add_row(
+                outlier_txt,
+                f"{v.views_per_day:,.0f}",
+                f"{v.view_count:,}",
+                f"{v.duration_sec}s",
+                v.title_pattern,
+                _ascii_safe(v.channel_title)[:20],
+                _ascii_safe(v.title)[:48],
+            )
+        console.print(table)
+        hooks = [v for v in videos if v.hook_transcript][:3]
+        for v in hooks:
+            console.print(
+                f"  [dim]Hook ({_ascii_safe(v.title)[:30]}):[/dim] {_ascii_safe(v.hook_transcript or '')}"
+            )
+
+    if summary is not None and getattr(summary, "takeaways", None):
+        console.print("[bold]Format Takeaways:[/bold]")
+        for item in summary.takeaways:
+            console.print(f"  - {_ascii_safe(item)}")
+
+
+@research_app.command("youtube")
+def research_youtube_cmd(
+    query: str = typer.Argument(..., help="Search query (e.g. 'how databases index data')"),
+    limit: int = typer.Option(15, "--limit", help="Max YouTube results to inspect (1-50)"),
+    max_duration: int = typer.Option(90, "--max-duration", help="Max Shorts duration in seconds"),
+    all_durations: bool = typer.Option(
+        False, "--all-durations", help="Include standard long-form videos too"
+    ),
+    days: int | None = typer.Option(None, "--days", help="Only include uploads from last N days"),
+    order: YouTubeOrder = typer.Option(YouTubeOrder.RELEVANCE, "--order", help="API search order"),
+    sort: YouTubeSort = typer.Option(
+        YouTubeSort.OUTLIER, "--sort", help="Rank by: outlier, views, or velocity"
+    ),
+    transcripts: int = typer.Option(
+        5, "--transcripts", help="Extract opening hook transcripts for top N videos"
+    ),
+    no_save: bool = typer.Option(False, "--no-save", help="Do not save into channels/research.json"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON ResearchSnapshot"),
+) -> None:
+    """Scan YouTube Shorts competitors, rank outliers, and extract opening hooks."""
+    try:
+        snapshot = research_youtube(
+            query=query,
+            limit=limit,
+            max_duration_sec=max_duration,
+            shorts_only=not all_durations,
+            days=days,
+            order=order,
+            sort_by=sort,
+            transcript_limit=transcripts,
+            save=not no_save,
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(snapshot.model_dump_json(indent=2))
+        return
+
+    for warn in snapshot.warnings:
+        console.print(f"[yellow][WARN][/yellow] {_ascii_safe(warn)}")
+    _print_video_research(
+        snapshot.videos,
+        snapshot.format_summary,
+        f"YouTube Competitors: {_ascii_safe(query)}",
+    )
+
+
+@research_app.command("trends")
+def research_trends_cmd(
+    seed: list[str] | None = typer.Option(
+        None, "--seed", help="Autocomplete seed prefix (repeatable)"
+    ),
+    sources: str = typer.Option(
+        "youtube,google,hn,reddit",
+        "--sources",
+        help="Comma-separated zero-key feeds: youtube, google, hn, reddit",
+    ),
+    limit: int = typer.Option(10, "--limit", help="Max signals per feed/seed"),
+    topic: str | None = typer.Option(None, "--topic", help="Focus topic for autocomplete/Reddit"),
+    no_save: bool = typer.Option(False, "--no-save", help="Do not save into channels/research.json"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON ResearchSnapshot"),
+) -> None:
+    """Gather zero-key audience demand signals from YouTube, Google, HN, and Reddit."""
+    source_list = [part.strip() for part in sources.split(",") if part.strip()]
+    try:
+        snapshot = research_trends(
+            seeds=seed,
+            sources=source_list,
+            limit=limit,
+            topic=topic,
+            save=not no_save,
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(snapshot.model_dump_json(indent=2))
+        return
+
+    for warn in snapshot.warnings:
+        console.print(f"[yellow][WARN][/yellow] {_ascii_safe(warn)}")
+
+    table = Table(title=f"Trend Signals ({len(snapshot.trends)})", box=box.ASCII)
+    table.add_column("Source", style="cyan")
+    table.add_column("Seed")
+    table.add_column("Score", justify="right")
+    table.add_column("Title")
+    for sig in snapshot.trends:
+        score_txt = str(sig.score) if sig.score is not None else "-"
+        table.add_row(sig.source, _ascii_safe(sig.seed), score_txt, _ascii_safe(sig.title))
+    console.print(table)
+
+
+@research_app.command("show")
+def research_show_cmd(
+    top: int = typer.Option(10, "--top", help="Number of top videos/trends to show"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON ResearchPlaybook"),
+) -> None:
+    """Show the persistent research playbook at channels/research.json."""
+    try:
+        playbook = load_research_playbook()
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(playbook.model_dump_json(indent=2))
+        return
+
+    console.print(
+        f"[bold]Research Playbook[/bold]: {len(playbook.videos)} video(s), "
+        f"{len(playbook.trends)} trend(s), {len(playbook.learned_insights)} insight(s)"
+    )
+    _print_video_research(
+        playbook.videos[:top],
+        playbook.format_summary,
+        f"Top {min(top, len(playbook.videos))} Playbook Videos",
+    )
+    if playbook.learned_insights:
+        console.print("[bold]Learned Insights:[/bold]")
+        for note in playbook.learned_insights:
+            console.print(f"  * {_ascii_safe(note)}")
+
+
+@research_app.command("insight")
+def research_insight_cmd(
+    note: str = typer.Argument(..., help="Format rule or hook insight to persist"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON ResearchPlaybook"),
+) -> None:
+    """Record a learned format takeaway in channels/research.json."""
+    try:
+        playbook = add_playbook_insight(note)
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(playbook.model_dump_json(indent=2))
+        return
+
+    console.print(
+        f"[green][OK][/green] Saved insight ({len(playbook.learned_insights)} total): "
+        f"{_ascii_safe(note.strip())}"
+    )
 
 
 if __name__ == "__main__":

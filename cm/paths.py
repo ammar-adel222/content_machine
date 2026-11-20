@@ -65,6 +65,11 @@ def catalog_path(root: Path | None = None) -> Path:
     return channels_dir(root) / "catalog.json"
 
 
+def research_path(root: Path | None = None) -> Path:
+    """Return the path to channels/research.json."""
+    return channels_dir(root) / "research.json"
+
+
 def assets_dir(root: Path | None = None) -> Path:
     """Return the directory storing audio and visual assets."""
     return (root or get_repo_root()) / "assets"
