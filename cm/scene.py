@@ -26,6 +26,7 @@ from cm.paths import (
     run_dir,
 )
 from cm.state import load_state, update_stage
+from cm.tts import inject_timeline_into_html
 
 
 def _build_word_timings(
@@ -341,6 +342,9 @@ def scaffold_scene(
     engine_base_url = os.path.relpath(eng_dir, rdir.resolve()).replace("\\", "/")
 
     html = render_starter_scene_html(blueprint, engine_base_url=engine_base_url)
+    timeline_path = rdir / "audio" / "timeline.json"
+    if timeline_path.is_file():
+        html = inject_timeline_into_html(html, timeline_path.read_text(encoding="utf-8"))
     atomic_write_text(scene_path, html)
 
     current_scene_rec = state.stages.get(PipelineStage.SCENE)

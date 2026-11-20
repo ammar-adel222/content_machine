@@ -1,0 +1,38 @@
+{
+  "pop_build": [
+    "pop_build.wav"
+  ],
+  "click_ui": [
+    "click_ui.wav"
+  ],
+  "whoosh": [
+    "whoosh.wav"
+  ],
+  "tick_data": [
+    "tick_data.wav"
+  ],
+  "riser_stress": [
+    "riser_stress.wav"
+  ],
+  "pulse_load": [
+    "pulse_load.wav"
+  ],
+  "impact_fail": [
+    "impact_fail.wav"
+  ],
+  "glitch_error": [
+    "glitch_error.wav"
+  ],
+  "alarm_breach": [
+    "alarm_breach.wav"
+  ],
+  "stamp_hit": [
+    "stamp_hit.wav"
+  ],
+  "chime_fix": [
+    "chime_fix.wav"
+  ],
+  "lock_upgrade": [
+    "lock_upgrade.wav"
+  ]
+}

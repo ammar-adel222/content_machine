@@ -482,3 +482,57 @@ class QaReport(BaseModel):
     beat_diffs: list[BeatDiffCheck] = Field(default_factory=list)
     keyframes: list[KeyframeAudit] = Field(default_factory=list)
     violations: list[QaViolation] = Field(default_factory=list)
+
+
+class WordTiming(BaseModel):
+    """Per-word timestamp used for synced kinetic captions."""
+
+    word: str
+    start_sec: float
+    end_sec: float
+
+
+class TimedBeatAudio(BaseModel):
+    """Synthesized speech clip and timing boundaries for a single beat."""
+
+    beat_id: str
+    kind: BeatKind
+    version_label: str
+    narration: str
+    cache_key: str
+    clip_path: str
+    provider: Literal["gemini", "mock"]
+    start_sec: float
+    speech_end_sec: float
+    end_sec: float
+    duration_sec: float
+    pause_after_ms: int
+    word_timings: list[WordTiming] = Field(default_factory=list)
+
+
+class ScheduledSfx(BaseModel):
+    """Resolved sound-effect placement within the mastered audio mix."""
+
+    beat_id: str
+    cue: SfxCue
+    time_sec: float
+    gain_db: float
+    file_path: str
+
+
+class AudioTimeline(BaseModel):
+    """Complete audio synthesis and mastering timeline at runs/<slug>/audio/timeline.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str
+    provider: Literal["gemini", "mock"]
+    model: str
+    voice_name: str
+    sample_rate: int = 48000
+    total_duration_sec: float
+    voice_track_path: str
+    master_audio_path: str | None = None
+    target_lufs: float = -14.0
+    measured_lufs: float | None = None
+    beats: list[TimedBeatAudio] = Field(default_factory=list)
+    sfx_events: list[ScheduledSfx] = Field(default_factory=list)

@@ -16,9 +16,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from cm.audio import mix_run_audio
 from cm.catalog import add_idea, find_idea, load_catalog, set_idea_status
 from cm.models import (
     PIPELINE_ORDER,
+    AudioTimeline,
     Blueprint,
     Catalog,
     FormatPreset,
@@ -32,6 +34,7 @@ from cm.models import (
 )
 from cm.paths import resolve_engine_dir, run_dir
 from cm.scene import create_preview_server, resolve_preview_target, scaffold_scene
+from cm.sfx import init_sfx_pack, list_sfx_slots
 from cm.snapshot import SnapshotMode, run_snapshot
 from cm.state import (
     compute_next_action,
@@ -40,6 +43,7 @@ from cm.state import (
     load_state,
     update_stage,
 )
+from cm.tts import TtsProvider, synthesize_run_tts
 from cm.validators import validate_blueprint_file
 
 app = typer.Typer(
@@ -57,8 +61,20 @@ scene_app = typer.Typer(
     help="Scaffold and inspect 2D HTML scene files",
     no_args_is_help=True,
 )
+sfx_app = typer.Typer(
+    name="sfx",
+    help="Manage semantic sound-effect packs and procedural synth cues",
+    no_args_is_help=True,
+)
+audio_app = typer.Typer(
+    name="audio",
+    help="Mix voiceover, SFX cues, and background music to -14 LUFS",
+    no_args_is_help=True,
+)
 app.add_typer(ideas_app, name="ideas")
 app.add_typer(scene_app, name="scene")
+app.add_typer(sfx_app, name="sfx")
+app.add_typer(audio_app, name="audio")
 
 console = Console()
 
@@ -78,6 +94,7 @@ class SchemaModel(StrEnum):
     STATE = "state"
     CATALOG = "catalog"
     QA = "qa"
+    TIMELINE = "timeline"
 
 
 def _fail(message: str, as_json: bool, code: int = 1) -> NoReturn:
@@ -309,7 +326,7 @@ def validate(
 def schema(
     model: SchemaModel = typer.Argument(
         SchemaModel.BLUEPRINT,
-        help="Schema to export: blueprint, state, catalog, or qa",
+        help="Schema to export: blueprint, state, catalog, qa, or timeline",
     ),
 ) -> None:
     """Print the JSON Schema for a Content Machine contract model."""
@@ -318,6 +335,7 @@ def schema(
         SchemaModel.STATE: RunState,
         SchemaModel.CATALOG: Catalog,
         SchemaModel.QA: QaReport,
+        SchemaModel.TIMELINE: AudioTimeline,
     }
     typer.echo(json.dumps(model_map[model].model_json_schema(), indent=2))
 
@@ -606,6 +624,141 @@ def snapshot(
 
     if not report.passed:
         raise typer.Exit(code=1)
+
+
+@sfx_app.command("init")
+def sfx_init(
+    force: bool = typer.Option(False, "--force", help="Regenerate all procedural WAV cues"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Initialize assets/sfx/manifest.json and procedural starter WAV files."""
+    try:
+        summary = init_sfx_pack(force=force)
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(json.dumps(summary, indent=2))
+        return
+
+    gen = summary["generated"]
+    pres = summary["preserved"]
+    console.print(
+        f"[green][OK][/green] SFX pack ready at {summary['sfx_dir']} "
+        f"(generated {len(gen)}, preserved {len(pres)})"  # type: ignore[arg-type]
+    )
+
+
+@sfx_app.command("list")
+def sfx_list(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """List semantic SFX slots and check backing WAV availability."""
+    try:
+        slots = list_sfx_slots()
+    except ValueError as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(json.dumps({"slots": slots}, indent=2))
+        return
+
+    table = Table(title="Semantic SFX Cue Slots", box=box.ASCII)
+    table.add_column("Cue", style="bold")
+    table.add_column("Files")
+    table.add_column("Status")
+    table.add_column("Duration")
+    for slot in slots:
+        dur_str = f"{slot['duration_sec']:.3f}s" if slot["duration_sec"] is not None else "-"
+        table.add_row(
+            str(slot["cue"]),
+            ", ".join(slot["files"]),  # type: ignore[arg-type]
+            "READY" if slot["exists"] else "MISSING",
+            dur_str,
+        )
+    console.print(table)
+
+
+@audio_app.command("mix")
+def audio_mix(
+    slug: str = typer.Argument(..., help="Run slug with existing audio/timeline.json"),
+    music: Path | None = typer.Option(None, "--music", help="Optional background music bed path"),
+    music_gain_db: float = typer.Option(-22.0, "--music-gain-db", max=0.0, min=-45.0),
+    target_lufs: float = typer.Option(-14.0, "--target-lufs", max=-6.0, min=-24.0),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Mix voiceover, beat SFX cues, and ducked music bed to -14 LUFS."""
+    try:
+        timeline = mix_run_audio(
+            slug=slug,
+            music_path=music,
+            music_gain_db=music_gain_db,
+            target_lufs=target_lufs,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(timeline.model_dump_json(indent=2))
+        return
+
+    console.print(
+        f"[green][OK][/green] Mastered {slug}/audio/{timeline.master_audio_path} "
+        f"({timeline.total_duration_sec:.2f}s, {len(timeline.sfx_events)} SFX, "
+        f"{timeline.measured_lufs:.2f} LUFS)"
+    )
+
+
+@app.command()
+def tts(
+    slug: str = typer.Argument(..., help="Run slug to synthesize per-beat voiceover"),
+    provider: TtsProvider = typer.Option(
+        TtsProvider.AUTO,
+        "--provider",
+        help="TTS backend: auto (uses GEMINI_API_KEY), gemini, or mock",
+    ),
+    model: str | None = typer.Option(None, "--model", help="Override Gemini TTS model"),
+    voice: str | None = typer.Option(None, "--voice", help="Override prebuilt voice name"),
+    force: bool = typer.Option(False, "--force", help="Ignore SHA-256 clip cache"),
+    no_mix: bool = typer.Option(False, "--no-mix", help="Skip automatic SFX + LUFS mastering"),
+    music: Path | None = typer.Option(None, "--music", help="Optional background music bed path"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Synthesize per-beat TTS audio, build timeline.json, and optionally master mix."""
+    try:
+        timeline = synthesize_run_tts(
+            slug=slug,
+            provider=provider,
+            model=model,
+            voice_name=voice,
+            force=force,
+        )
+        if no_mix:
+            update_stage(
+                slug=slug,
+                stage=PipelineStage.AUDIO,
+                status=StageStatus.IN_PROGRESS,
+                notes=f"{timeline.provider} voice assembled ({len(timeline.beats)} beats; unmixed)",
+                advance_on_pass=False,
+            )
+        else:
+            timeline = mix_run_audio(slug=slug, music_path=music)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(timeline.model_dump_json(indent=2))
+        return
+
+    mix_info = (
+        f"mastered {timeline.measured_lufs:.2f} LUFS"
+        if timeline.measured_lufs is not None
+        else "voice only (--no-mix)"
+    )
+    console.print(
+        f"[green][OK][/green] TTS ({timeline.provider}) for '{slug}': "
+        f"{len(timeline.beats)} beats, {timeline.total_duration_sec:.2f}s ({mix_info})"
+    )
 
 
 if __name__ == "__main__":

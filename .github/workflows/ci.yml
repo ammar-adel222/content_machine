@@ -34,6 +34,15 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m playwright install chromium
 
+      - name: Ensure FFmpeg is installed (Linux)
+        if: runner.os == 'Linux'
+        run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
+      - name: Ensure FFmpeg is installed (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y }
+
       - name: Run Ruff lint checks
         run: ruff check cm tests
 
