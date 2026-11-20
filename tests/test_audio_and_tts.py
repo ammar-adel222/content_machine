@@ -147,6 +147,7 @@ def test_tts_helpers_normalization_and_mocked_gemini(
 
     assert parse_pcm_rate(None) == 24000
     assert parse_pcm_rate("audio/L16;codec=pcm;rate=16000") == 16000
+    assert parse_pcm_rate("audio/l16; rate=24000; channels=1") == 24000
 
     with pytest.raises(ValueError, match="empty"):
         normalize_tts_bytes_to_wav(b"", None, tmp_path / "empty.wav")
@@ -174,10 +175,16 @@ def test_tts_helpers_normalization_and_mocked_gemini(
     # Mock google.genai.Client returning base64 RIFF WAV via candidates fallback
     wav_b64 = base64.b64encode(_tone_wav_bytes(0.5, rate=24000)).decode("ascii")
     calls: list[dict] = []
+    client_http_options: list[dict[str, object] | None] = []
 
     class FakeClient:
-        def __init__(self, api_key: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            http_options: dict[str, object] | None = None,
+        ) -> None:
             self.api_key = api_key
+            client_http_options.append(http_options)
             self.models = self
 
         def generate_content(self, **kwargs):
@@ -211,11 +218,17 @@ def test_tts_helpers_normalization_and_mocked_gemini(
         out_wav=gem_out,
     )
     assert gem_dur == pytest.approx(0.5, abs=0.05)
+    assert client_http_options == [{"api_version": "v1beta"}]
     assert "Speak in this style: Fast and clear" in calls[0]["contents"]
 
     # Empty Gemini response raises clear RuntimeError
     class EmptyClient:
-        def __init__(self, api_key: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            http_options: dict[str, object] | None = None,
+        ) -> None:
+            _ = (api_key, http_options)
             self.models = self
 
         def generate_content(self, **kwargs):
@@ -285,8 +298,13 @@ def test_tts_cache_hit_invalidation_env_and_scene_sync(
     pcm_payload = _tone_pcm_bytes(0.45, rate=24000)
 
     class AutoFakeClient:
-        def __init__(self, api_key: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            http_options: dict[str, object] | None = None,
+        ) -> None:
             assert api_key == "from-dotenv-file"
+            assert http_options == {"api_version": "v1beta"}
             self.models = self
 
         def generate_content(self, **kwargs):

@@ -246,7 +246,10 @@ def synthesize_gemini_clip(
         if style_prompt and style_prompt.strip()
         else narration
     )
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"api_version": "v1beta"},
+    )
     response = client.models.generate_content(
         model=model,
         contents=prompt,
