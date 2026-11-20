@@ -12,11 +12,11 @@ Every milestone and change must satisfy these non-negotiable checks before commi
 
 ## Milestones
 
-1. **Milestone 1 — Core Harness Skeleton & Blueprint Validator**
+1. **[DONE] Milestone 1 — Core Harness Skeleton & Blueprint Validator**
    - Python 3.13 `.venv`, `pyproject.toml` (`cm` CLI), file-backed state machine (`runs/<slug>/state.json`), and `channels/catalog.json`.
    - Pydantic schema & retention linter (`cm new`, `cm status`, `cm validate`) enforcing Hook + Build → Stress-Test → Fail → Upgrade chains.
 
-2. **Milestone 2 — 2D Dark-Blueprint Visual Engine (`engine/`)**
+2. **[DONE] Milestone 2 — 2D Dark-Blueprint Visual Engine (`engine/`)**
    - Deterministic `runtime.js` (`window.__HARNESS__.seek(t)` + `?preview=1` interactive scrubber).
    - `tokens.css` (`short_9x16` + future `long_16x9` safe-zone presets).
    - `primitives.js` (CS/AI nodes, animated packet flows, load/latency gauges, version HUD, breach stamps + camera shake, synced kinetic captions).
@@ -32,9 +32,15 @@ Every milestone and change must satisfy these non-negotiable checks before commi
 5. **Milestone 5 — Parallel Video Renderer (`cm render`)**
    - Parallel headless Chromium chunk capture piped into FFmpeg H.264/AAC MP4 (`1080×1920`, 30fps preview / 60fps final) muxed with mastered audio.
 
-6. **Milestone 6 — Portable Agent Skills & End-to-End Prototype Short**
+6. **Milestone 6 — Research & YouTube Shorts Competitor Intelligence (`cm research`)** *(can be prioritized ahead of schedule)*
+   - **YouTube Shorts Competitor & Outlier Scanner (`cm research youtube`):** Searches similar AI/CS/engineering Shorts (`<= 90s`) via YouTube Data API v3 (`search.list`, `videos.list`, `channels.list`), computes outlier score (`views / subscribers`), `views/day`, engagement rate, and extracts opening-hook transcripts so agents learn what titles, durations, and first-3-second hooks actually outperform.
+   - **Zero-Key Audience Demand Feeds (`cm research trends`):** YouTube/Google Autocomplete query mining (`"how does AI..."`, `"why does..."`), Hacker News top stories, and `r/explainlikeimfive` tech curiosity feeds.
+   - **Persistent Format Playbook (`channels/research.json`):** Stores competitor snapshots and learned format insights so agents refine hook and pacing patterns over time.
+
+7. **Milestone 7 — Portable Agent Skills & End-to-End Prototype Short**
    - `AGENTS.md`, `CLAUDE.md`, and `.agents/skills/` (`ideate`, `blueprint`, `build-scene`, `visual-qa`, `publish`).
    - Produce and verify 1 complete flagship prototype Short end-to-end.
 
-7. **Milestone 7 — Auto-Publishing (YouTube Shorts & Instagram Reels)**
+8. **Milestone 8 — Auto-Publishing & Analytics Sync (YouTube Shorts & Instagram Reels)**
    - `cm auth youtube`, `cm publish <slug> --dry-run` / live upload via YouTube Data API v3 + Instagram Graph API (with pluggable staging uploader) + `channels/catalog.json` publish receipts.
+   - **Channel Analytics Sync (`cm analytics sync`):** Pulls views, likes, and comments for our own published Shorts back into `channels/catalog.json` to close the feedback loop.
