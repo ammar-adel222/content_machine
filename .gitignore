@@ -25,6 +25,7 @@ token.json
 # Generated run artifacts & heavy media
 runs/*
 !runs/.gitkeep
+*_qa/
 assets/sfx/*.wav
 assets/sfx/*.mp3
 assets/music/*.wav

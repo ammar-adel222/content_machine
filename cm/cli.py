@@ -24,6 +24,7 @@ from cm.models import (
     FormatPreset,
     IdeaStatus,
     PipelineStage,
+    QaReport,
     RunState,
     StageRecord,
     StageStatus,
@@ -31,6 +32,7 @@ from cm.models import (
 )
 from cm.paths import resolve_engine_dir, run_dir
 from cm.scene import create_preview_server, resolve_preview_target, scaffold_scene
+from cm.snapshot import SnapshotMode, run_snapshot
 from cm.state import (
     compute_next_action,
     init_run,
@@ -75,6 +77,7 @@ class SchemaModel(StrEnum):
     BLUEPRINT = "blueprint"
     STATE = "state"
     CATALOG = "catalog"
+    QA = "qa"
 
 
 def _fail(message: str, as_json: bool, code: int = 1) -> NoReturn:
@@ -306,7 +309,7 @@ def validate(
 def schema(
     model: SchemaModel = typer.Argument(
         SchemaModel.BLUEPRINT,
-        help="Schema to export: blueprint, state, or catalog",
+        help="Schema to export: blueprint, state, catalog, or qa",
     ),
 ) -> None:
     """Print the JSON Schema for a Content Machine contract model."""
@@ -314,6 +317,7 @@ def schema(
         SchemaModel.BLUEPRINT: Blueprint,
         SchemaModel.STATE: RunState,
         SchemaModel.CATALOG: Catalog,
+        SchemaModel.QA: QaReport,
     }
     typer.echo(json.dumps(model_map[model].model_json_schema(), indent=2))
 
@@ -531,6 +535,77 @@ def preview(
         pass
     finally:  # pragma: no cover
         server.server_close()
+
+
+@app.command()
+def snapshot(
+    target: str = typer.Argument(..., help="Run slug or path to a scene.html file"),
+    mode: SnapshotMode = typer.Option(
+        SnapshotMode.ALL,
+        "--mode",
+        help="Keyframe capture mode: all (start/mid/end) or mid",
+    ),
+    out: Path | None = typer.Option(
+        None, "--out", help="Optional custom QA output directory"
+    ),
+    min_diff: float = typer.Option(
+        0.5,
+        "--min-diff",
+        min=0.0,
+        max=100.0,
+        help="Minimum % stage pixel diff between consecutive beats",
+    ),
+    safe_guides: bool = typer.Option(
+        True,
+        "--safe-guides/--no-safe-guides",
+        help="Draw safe-zone guides on contact_sheet.png",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Capture headless Chromium keyframes, audit layout/diffs, and build contact sheet."""
+    try:
+        report = run_snapshot(
+            target=target,
+            mode=mode,
+            out_dir=out,
+            min_beat_diff_pct=min_diff,
+            safe_guides=safe_guides,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+        if not report.passed:
+            raise typer.Exit(code=1)
+        return
+
+    badge = "[green][PASS][/green]" if report.passed else "[red][FAIL][/red]"
+    console.print(
+        f"{badge} {report.slug} ({report.mode}) - {report.frame_count} frame(s), "
+        f"{report.error_count} violation(s)"
+    )
+    console.print(f"Contact sheet: {report.contact_sheet_path}")
+
+    if report.beat_diffs:
+        diff_table = Table(title="Beat Stage Visual Diffs", box=box.ASCII)
+        diff_table.add_column("Transition")
+        diff_table.add_column("Diff %")
+        diff_table.add_column("Status")
+        for bd in report.beat_diffs:
+            diff_table.add_row(
+                f"{bd.from_beat_id} -> {bd.to_beat_id}",
+                f"{bd.diff_pct:.2f}%",
+                "PASS" if bd.passed else "FAIL",
+            )
+        console.print(diff_table)
+
+    for viol in report.violations:
+        loc = f"[{viol.beat_id}:{viol.label}] " if viol.beat_id else ""
+        console.print(f"[red]  ERROR {viol.code}[/red] {loc}{viol.message}")
+
+    if not report.passed:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

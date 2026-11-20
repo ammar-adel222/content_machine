@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Agent-native 2D AI/CS content production harness"
 requires-python = ">=3.12"
 dependencies = [
+    "pillow>=10.0",
     "playwright>=1.49",
     "pydantic>=2.10",
     "python-dotenv>=1.0",
@@ -42,6 +43,7 @@ ignore = ["E501", "B008"]
 [tool.coverage.run]
 source = ["cm"]
 branch = true
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = true

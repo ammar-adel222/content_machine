@@ -90,10 +90,13 @@ def test_scaffold_scene_short_long_overwrite_and_errors(
     assert scene_path2 == scene_path
     assert load_state("password-system").stages[PipelineStage.SCENE].status == StageStatus.IN_PROGRESS
 
-    # In-repo engine path produces relative ../../engine URL
+    # Portable ../../engine relative path works over both HTTP and file://
+    assert "../../engine/tokens.css" in html
+    assert (tmp_path / "engine" / "runtime.js").is_file()
+
+    # Overwriting with an already-existing local engine directory preserves custom assets
     local_engine = tmp_path / "engine"
-    local_engine.mkdir()
-    (local_engine / "runtime.js").write_text("// ok", encoding="utf-8")
+    local_engine.mkdir(exist_ok=True)
     scene_rel = scaffold_scene("password-system", force=True)
     assert "../../engine/tokens.css" in scene_rel.read_text(encoding="utf-8")
 

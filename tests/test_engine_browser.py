@@ -18,7 +18,7 @@ EXAMPLE_BP = REPO_ROOT / "examples" / "password_system.blueprint.json"
 EXAMPLE_SCENE = REPO_ROOT / "examples" / "password_system.scene.html"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)

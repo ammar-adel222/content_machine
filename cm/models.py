@@ -429,3 +429,56 @@ class ValidationReport(BaseModel):
     errors: list[LintIssue]
     warnings: list[LintIssue]
     metrics: BlueprintMetrics | None = None
+
+
+class QaViolation(BaseModel):
+    """Single visual, layout, or runtime violation detected by cm snapshot."""
+
+    code: str
+    beat_id: str | None = None
+    label: str | None = None
+    t: float | None = None
+    element: str = ""
+    message: str
+
+
+class KeyframeAudit(BaseModel):
+    """Capture and DOM layout audit summary for a single keyframe."""
+
+    beat_id: str
+    beat_index: int
+    label: str
+    t: float
+    frame_path: str
+    passed: bool
+    stage_element_count: int
+    pixel_stddev: float
+    violations: list[QaViolation] = Field(default_factory=list)
+
+
+class BeatDiffCheck(BaseModel):
+    """Stage-cropped visual difference check between consecutive beats."""
+
+    from_beat_id: str
+    to_beat_id: str
+    diff_pct: float
+    passed: bool
+
+
+class QaReport(BaseModel):
+    """Structured visual QA report persisted to runs/<slug>/qa/report.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str
+    scene_path: str
+    format: FormatPreset
+    width: int
+    height: int
+    mode: Literal["all", "mid"]
+    passed: bool
+    contact_sheet_path: str
+    frame_count: int
+    error_count: int
+    beat_diffs: list[BeatDiffCheck] = Field(default_factory=list)
+    keyframes: list[KeyframeAudit] = Field(default_factory=list)
+    violations: list[QaViolation] = Field(default_factory=list)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -151,7 +152,34 @@ def render_starter_scene_html(blueprint: Blueprint, engine_base_url: str) -> str
         P.clear(svg);
 
         if (isWide) {{
-          if (beat.kind === "upgrade" || beat.kind === "payoff") {{
+          if (beat.kind === "hook") {{
+            P.node(svg, {{
+              x: 640, y: 120, w: 480, h: 150,
+              title: "Baseline Concept", subtitle: ctx.blueprint.topic_domain.toUpperCase() + " v0.1",
+              icon: "unlock", accent: "violet", scale: 0.95 + 0.05 * ease,
+            }});
+            P.gauge(svg, {{
+              x: 610, y: 380, w: 540,
+              label: "STAGE", valueText: "HOOK", ratio: 0.08, accent: "violet",
+            }});
+            return;
+          }}
+          if (beat.kind === "payoff") {{
+            P.shieldAura(svg, {{ x: 40, y: 30, w: 1680, h: 490, t: t, progress: ease, accent: "emerald" }});
+            P.codeCard(svg, {{
+              x: 420, y: 80, w: 920,
+              title: "Final Architecture (" + beat.version_label + ")",
+              lines: ["1. All failure modes solved", "2. System status: RESILIENT", "3. Progression: " + ctx.timeline.versionProgression.join(" -> ")],
+              highlightLine: 1,
+              accent: "emerald",
+            }});
+            P.gauge(svg, {{
+              x: 610, y: 400, w: 540,
+              label: "FINAL STATUS", valueText: "RESILIENT", ratio: 1.0, accent: "emerald",
+            }});
+            return;
+          }}
+          if (beat.kind === "upgrade") {{
             P.shieldAura(svg, {{ x: 40, y: 30, w: 1680, h: 360, t: t, progress: ease, accent: "emerald" }});
           }}
           P.node(svg, {{
@@ -195,7 +223,36 @@ def render_starter_scene_html(blueprint: Blueprint, engine_base_url: str) -> str
           return;
         }}
 
-        if (beat.kind === "upgrade" || beat.kind === "payoff") {{
+        if (beat.kind === "hook") {{
+          P.node(svg, {{
+            x: 198, y: 240, w: 460, h: 150,
+            title: "Baseline Concept", subtitle: ctx.blueprint.topic_domain.toUpperCase() + " v0.1",
+            icon: "unlock", accent: "violet", scale: 0.94 + 0.06 * ease,
+          }});
+          P.gauge(svg, {{
+            x: 178, y: 694, w: 500,
+            label: "PROGRESS", valueText: "HOOK", ratio: 0.08, accent: "violet",
+          }});
+          return;
+        }}
+
+        if (beat.kind === "payoff") {{
+          P.shieldAura(svg, {{ x: 44, y: 44, w: 768, h: 600, t: t, progress: ease, accent: "emerald" }});
+          P.codeCard(svg, {{
+            x: 88, y: 180, w: 680,
+            title: "Final System (" + beat.version_label + ")",
+            lines: ["1. Failure modes resolved", "2. Status: RESILIENT", "3. Path: " + ctx.timeline.versionProgression.join("->")],
+            highlightLine: 1,
+            accent: "emerald",
+          }});
+          P.gauge(svg, {{
+            x: 178, y: 694, w: 500,
+            label: "FINAL STATUS", valueText: "RESILIENT", ratio: 1.0, accent: "emerald",
+          }});
+          return;
+        }}
+
+        if (beat.kind === "upgrade") {{
           P.shieldAura(svg, {{ x: 44, y: 36, w: 768, h: 616, t: t, progress: ease, accent: "emerald" }});
         }}
         P.node(svg, {{
@@ -271,10 +328,17 @@ def scaffold_scene(
 
     base_root = (root or get_repo_root()).resolve()
     eng_dir = resolve_engine_dir(root).resolve()
-    if eng_dir.is_relative_to(base_root):
-        engine_base_url = os.path.relpath(eng_dir, rdir.resolve()).replace("\\", "/")
-    else:
-        engine_base_url = eng_dir.as_uri()
+    if not eng_dir.is_relative_to(base_root):
+        local_engine = base_root / "engine"
+        local_engine.mkdir(parents=True, exist_ok=True)
+        for asset in ("tokens.css", "runtime.js", "primitives.js"):
+            src = eng_dir / asset
+            dst = local_engine / asset
+            if src.is_file() and not dst.exists():
+                shutil.copy2(src, dst)
+        eng_dir = local_engine.resolve()
+
+    engine_base_url = os.path.relpath(eng_dir, rdir.resolve()).replace("\\", "/")
 
     html = render_starter_scene_html(blueprint, engine_base_url=engine_base_url)
     atomic_write_text(scene_path, html)
