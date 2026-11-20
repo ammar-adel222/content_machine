@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Agent-native 2D AI/CS content production harness"
 requires-python = ">=3.12"
 dependencies = [
+    "playwright>=1.49",
     "pydantic>=2.10",
     "python-dotenv>=1.0",
     "rich>=13.9",

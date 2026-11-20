@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import urllib.request
+import webbrowser
 from enum import StrEnum
 from pathlib import Path
 from typing import NoReturn
@@ -26,7 +29,8 @@ from cm.models import (
     StageStatus,
     TopicDomain,
 )
-from cm.paths import run_dir
+from cm.paths import resolve_engine_dir, run_dir
+from cm.scene import create_preview_server, resolve_preview_target, scaffold_scene
 from cm.state import (
     compute_next_action,
     init_run,
@@ -46,7 +50,13 @@ ideas_app = typer.Typer(
     help="Manage the idea backlog and channel deduplication",
     no_args_is_help=True,
 )
+scene_app = typer.Typer(
+    name="scene",
+    help="Scaffold and inspect 2D HTML scene files",
+    no_args_is_help=True,
+)
 app.add_typer(ideas_app, name="ideas")
+app.add_typer(scene_app, name="scene")
 
 console = Console()
 
@@ -443,6 +453,84 @@ def ideas_pick(
         f"[green][OK][/green] Picked {updated_idea.id} -> initialized run '{state.slug}' at {rdir}"
     )
     console.print(f"Next: {next_action}")
+
+
+@scene_app.command("init")
+def scene_init(
+    slug: str = typer.Argument(..., help="Run slug to scaffold scene.html for"),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing scene.html"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Scaffold runs/<slug>/scene.html from runs/<slug>/blueprint.json."""
+    try:
+        scene_path = scaffold_scene(slug=slug, force=force)
+    except (FileNotFoundError, FileExistsError, ValueError) as exc:
+        _fail(str(exc), as_json)
+
+    next_action = f"Preview scene in browser: cm preview {slug}"
+    if as_json:
+        payload = {
+            "slug": slug,
+            "scene_path": str(scene_path),
+            "next_action": next_action,
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    console.print(f"[green][OK][/green] Scaffolded {scene_path}")
+    console.print(f"Next: {next_action}")
+
+
+@app.command()
+def preview(
+    target: str = typer.Argument(..., help="Run slug or path to a scene.html file"),
+    port: int = typer.Option(8765, "--port", min=0, max=65535, help="Local HTTP port (0 = ephemeral)"),
+    no_open: bool = typer.Option(False, "--no-open", help="Do not launch default web browser"),
+    once: bool = typer.Option(
+        False,
+        "--once",
+        help="Verify HTTP serving and exit immediately without blocking",
+    ),
+) -> None:
+    """Serve an interactive ?preview=1 scrubber for a 2D scene."""
+    try:
+        serve_root, rel_path = resolve_preview_target(target)
+        server = create_preview_server(
+            serve_root=serve_root,
+            port=port,
+            engine_fallback=resolve_engine_dir(),
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        _fail(str(exc), as_json=False)
+
+    actual_port = server.server_address[1]
+    base_url = f"http://127.0.0.1:{actual_port}/{rel_path.as_posix()}"
+    preview_url = f"{base_url}?preview=1"
+    console.print(f"[green][OK][/green] Preview URL: {preview_url}")
+
+    if once:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(base_url, timeout=5) as resp:
+                resp.read(1)
+        except OSError as exc:  # pragma: no cover
+            _fail(f"Preview self-check failed: {exc}", as_json=False)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        return
+
+    if not no_open:  # pragma: no cover
+        webbrowser.open(preview_url)
+    console.print("Press Ctrl+C to stop preview server.")  # pragma: no cover
+    try:  # pragma: no cover
+        server.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover
+        pass
+    finally:  # pragma: no cover
+        server.server_close()
 
 
 if __name__ == "__main__":

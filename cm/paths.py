@@ -73,3 +73,11 @@ def assets_dir(root: Path | None = None) -> Path:
 def engine_dir(root: Path | None = None) -> Path:
     """Return the directory storing the 2D visual engine."""
     return (root or get_repo_root()) / "engine"
+
+
+def resolve_engine_dir(root: Path | None = None) -> Path:
+    """Return the active engine directory, falling back to the package repo engine."""
+    candidate = engine_dir(root)
+    if (candidate / "runtime.js").is_file():
+        return candidate
+    return Path(__file__).resolve().parent.parent / "engine"
