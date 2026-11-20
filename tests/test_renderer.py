@@ -335,7 +335,9 @@ def test_renderer_error_paths_and_probe_failures(
         _mux_chunks([bad_chunk], None, tmp_path / "failed_out.mp4", tmp_path)
     assert not partial_tmp.exists()
 
-    def _fail_popen(*_args: object, **_kwargs: object) -> object:
+    real_popen = subprocess.Popen
+
+    def _fail_popen(cmd: object, *args: object, **kwargs: object) -> object:
         class _FakeProc:
             def __init__(self) -> None:
                 self.stdin = SimpleNamespace(
@@ -345,7 +347,9 @@ def test_renderer_error_paths_and_probe_failures(
             def wait(self) -> int:
                 return 2
 
-        return _FakeProc()
+        if isinstance(cmd, (list, tuple)) and bool(cmd) and str(cmd[0]) == "ffmpeg":
+            return _FakeProc()
+        return real_popen(cmd, *args, **kwargs)  # type: ignore[call-overload]
 
     tiny_ok = tmp_path / "tiny_ok.scene.html"
     tiny_ok.write_text(_minimal_harness_html(total_duration=0.05), encoding="utf-8")
