@@ -49,5 +49,7 @@ jobs:
       - name: Run pytest with branch coverage gate
         run: pytest -v --cov=cm --cov-branch --cov-fail-under=95
 
-      - name: CLI smoke check on reference blueprint
-        run: cm validate examples/password_system.blueprint.json
+      - name: CLI smoke check on reference blueprints
+        run: |
+          cm validate examples/password_system.blueprint.json
+          cm validate examples/rate_limiter.blueprint.json

@@ -37,9 +37,9 @@ Every milestone and change must satisfy these non-negotiable checks before commi
    - **Zero-Key Audience Demand Feeds (`cm research trends`):** YouTube/Google Autocomplete query mining (`"how does AI..."`, `"why does..."`), Hacker News top stories, and `r/explainlikeimfive` tech curiosity feeds.
    - **Persistent Format Playbook (`channels/research.json`):** Stores competitor snapshots and learned format insights so agents refine hook and pacing patterns over time.
 
-7. **Milestone 7 — Portable Agent Skills & End-to-End Prototype Short**
+7. **[DONE] Milestone 7 — Portable Agent Skills & End-to-End Prototype Short**
    - `AGENTS.md`, `CLAUDE.md`, and `.agents/skills/` (`ideate`, `blueprint`, `build-scene`, `visual-qa`, `publish`).
-   - Produce and verify 1 complete flagship prototype Short end-to-end.
+   - Produce and verify 1 complete flagship prototype Short (`rate-limiter`) end-to-end.
 
 8. **Milestone 8 — Auto-Publishing & Analytics Sync (YouTube Shorts & Instagram Reels)**
    - `cm auth youtube`, `cm publish <slug> --dry-run` / live upload via YouTube Data API v3 + Instagram Graph API (with pluggable staging uploader) + `channels/catalog.json` publish receipts.

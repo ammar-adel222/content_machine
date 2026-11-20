@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Building an API Rate Limiter From Scratch — Content Machine 3.0</title>
+  <link rel="stylesheet" href="../engine/tokens.css" />
+</head>
+<body>
+  <div id="cm-root"></div>
+
+  <script id="cm-blueprint-data" type="application/json">
+{
+  "schema_version": "1.0",
+  "slug": "rate-limiter",
+  "title": "Building an API Rate Limiter From Scratch",
+  "topic_domain": "systems",
+  "format": "short_9x16",
+  "core_premise": "Naive API counters break under boundary traffic spikes, timestamp memory explosions, and multi-server race conditions until you centralize token buckets inside atomic Redis scripts.",
+  "persistent_subject": "One persistent API traffic pipeline connecting Clients, API Nodes, and Rate Limiter State that evolves from v1.0 to v4.0.",
+  "target_audience": "curious software developers and CS learners",
+  "voice": {
+    "voice_name": "Charon",
+    "style_prompt": "Crisp, energetic systems-engineering explainer with urgent tension on crashes and clean relief on upgrades.",
+    "target_wpm": 165
+  },
+  "beats": [
+    {
+      "id": "b01_hook",
+      "kind": "hook",
+      "version_label": "v0.1",
+      "system_status": "initializing",
+      "narration": "How do servers stop millions of bots crashing an API?",
+      "on_screen_headline": "Stopping API Bot Floods",
+      "visual_state": "Dark blueprint pipeline showing a Bot Swarm flooding through an unguarded API Gateway toward the App Server.",
+      "visual_diff": "Reveal initial Bot Swarm -> API Gateway -> App Server silhouette with unlimited traffic warning.",
+      "metric_callout": { "label": "TRAFFIC", "value": "UNLIMITED", "severity": "neutral" },
+      "pause_after_ms": 150,
+      "sfx": [{ "cue": "pop_build", "at": "start", "gain_db": -12.0 }]
+    },
+    {
+      "id": "b02_v1_build",
+      "kind": "build",
+      "version_label": "v1.0",
+      "system_status": "building",
+      "narration": "Step one: count every user's requests inside a fixed sixty-second window bucket.",
+      "on_screen_headline": "v1: Fixed 60s Window",
+      "visual_state": "v1.0 pipeline inserts a Fixed 60s Window counter card capping each user at 100 requests per minute.",
+      "visual_diff": "Insert v1.0 Fixed 60s Window counter block between Client Traffic and API Backend.",
+      "metric_callout": { "label": "LIMIT", "value": "100 / MIN", "severity": "warn" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "pop_build", "at": "start", "gain_db": -12.0 },
+        { "cue": "tick_data", "at": "mid", "gain_db": -14.0 }
+      ]
+    },
+    {
+      "id": "b03_v1_fail",
+      "kind": "fail",
+      "version_label": "v1.0",
+      "system_status": "compromised",
+      "narration": "Bots hammer the boundary: one hundred hits at second fifty-nine and double-spike right past reset!",
+      "on_screen_headline": "2x Spike Crushes Server",
+      "visual_state": "Red breach view showing 100 requests at 0:59 and 100 more at 1:01 both passing v1.0 into an overloaded API.",
+      "visual_diff": "Flood boundary table rows with 200 hits in 2 seconds and slam BOUNDARY BURST stamp.",
+      "metric_callout": { "label": "BURST", "value": "200 / 2S", "severity": "danger" },
+      "failure_stamp": "BOUNDARY BURST",
+      "stress_test_trigger": "Bot sends 100 requests at 0:59 and 100 more at 1:01",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "riser_stress", "at": "start", "gain_db": -13.0 },
+        { "cue": "impact_fail", "at": 0.45, "gain_db": -10.0 },
+        { "cue": "stamp_hit", "at": 0.6, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b04_v2_upgrade",
+      "kind": "upgrade",
+      "version_label": "v2.0",
+      "system_status": "upgraded",
+      "narration": "Fix one: store every exact timestamp in a sorted log so no boundary spike sneaks past.",
+      "on_screen_headline": "v2: Sliding Timestamp Log",
+      "visual_state": "v2.0 Sliding Log table tracks individual timestamps and drops requests inside any rolling 60-second window.",
+      "visual_diff": "Upgrade counter to emerald-shielded Sliding 60s Log table blocking extra packets cleanly.",
+      "metric_callout": { "label": "ACCURACY", "value": "EXACT", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "chime_fix", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b05_v2_fail",
+      "kind": "fail",
+      "version_label": "v2.0",
+      "system_status": "compromised",
+      "narration": "Under heavy traffic, saving millions of rejected timestamps explodes server memory and stalls every lookup!",
+      "on_screen_headline": "Log Eats All Server RAM",
+      "visual_state": "1M attack clients flood the timestamp log to 80 GB, pushing memory gauge to 99% OOM with crimson crash stamp.",
+      "visual_diff": "Spike memory allocation card to 99% OOM and stamp OUT OF MEMORY over crashed server.",
+      "metric_callout": { "label": "RAM LOAD", "value": "99% OOM", "severity": "danger" },
+      "failure_stamp": "OUT OF MEMORY",
+      "stress_test_trigger": "One million attacking clients force storage of rejected timestamps",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "pulse_load", "at": "start", "gain_db": -13.0 },
+        { "cue": "glitch_error", "at": 0.5, "gain_db": -11.0 },
+        { "cue": "stamp_hit", "at": 0.65, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b06_v3_upgrade",
+      "kind": "upgrade",
+      "version_label": "v3.0",
+      "system_status": "upgraded",
+      "narration": "Fix two: store just two numbers per user with a token bucket refilling smoothly over time.",
+      "on_screen_headline": "v3: Token Bucket Counter",
+      "visual_state": "v3.0 Token Bucket card replaces the huge timestamp array with two numbers (tokens + last_ts) in 16 bytes.",
+      "visual_diff": "Replace bloated timestamp array with glowing v3.0 Token Bucket 16-byte state card.",
+      "metric_callout": { "label": "MEMORY", "value": "2 NUMBERS", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "pop_build", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b07_v3_fail",
+      "kind": "fail",
+      "version_label": "v3.0",
+      "system_status": "compromised",
+      "narration": "Scale to ten servers and bots hit every node cleanly, bypassing your limit ten times over!",
+      "on_screen_headline": "Cluster Multiplies Quota 10x",
+      "visual_state": "BotCluster spreads hits across 10 independent API nodes with separate local counters, leaking 1,000 requests instead of 100.",
+      "visual_diff": "Split single server into 3 parallel local-bucket nodes leaking 10X quota with 10X BYPASS stamp.",
+      "metric_callout": { "label": "LEAKED", "value": "10X QUOTA", "severity": "danger" },
+      "failure_stamp": "10X BYPASS",
+      "stress_test_trigger": "Bot cluster spreads requests across ten API nodes with isolated local buckets",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "alarm_breach", "at": "start", "gain_db": -12.0 },
+        { "cue": "impact_fail", "at": 0.45, "gain_db": -10.0 },
+        { "cue": "stamp_hit", "at": 0.6, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b08_v4_upgrade",
+      "kind": "upgrade",
+      "version_label": "v4.0",
+      "system_status": "upgraded",
+      "narration": "Fix three: centralize token buckets inside atomic Redis scripts so every server checks one truth.",
+      "on_screen_headline": "v4: Atomic Redis Buckets",
+      "visual_state": "All API nodes converge into one shared Redis Atomic Lua Engine executing race-free token updates in a single step.",
+      "visual_diff": "Converge parallel API nodes into shielded Redis Atomic Lua Engine with Single Global Truth.",
+      "metric_callout": { "label": "SYNC", "value": "ATOMIC LUA", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "whoosh", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b09_payoff",
+      "kind": "payoff",
+      "version_label": "v4.0",
+      "system_status": "resilient",
+      "narration": "Fixed windows to atomic Redis buckets: great rate limiters trade tiny state for cluster-wide certainty.",
+      "on_screen_headline": "Cluster-Wide Traffic Control",
+      "visual_state": "Architecture evolution ribbon comparing v1-v4 flows into a shielded Resilient API Limiter production SLA badge.",
+      "visual_diff": "Show v1 to v4 progression table feeding locked Resilient API Limiter badge.",
+      "metric_callout": { "label": "STATUS", "value": "RESILIENT", "severity": "good" },
+      "pause_after_ms": 250,
+      "sfx": [{ "cue": "chime_fix", "at": "start", "gain_db": -10.0 }]
+    }
+  ]
+}
+  </script>
+
+  <script src="../engine/runtime.js"></script>
+  <script src="../engine/primitives.js"></script>
+  <script>
+    (function () {
+      const P = window.CM.primitives;
+
+      function renderStage(ctx) {
+        const svg = ctx.svg;
+        const t = ctx.t;
+        const p = ctx.beatProgress;
+        const ease = ctx.CM.math.easeOutCubic(Math.min(1, p * 2.2));
+        const id = ctx.beat.id;
+
+        P.clear(svg);
+
+        if (id === "b01_hook") {
+          P.node(svg, {
+            x: 228, y: 46, w: 400, h: 118,
+            title: "Bot Swarm", subtitle: "1,000,000 req/s",
+            icon: "attacker", accent: "amber", scale: 0.94 + 0.06 * ease,
+            pulse: 0.5 + 0.5 * Math.sin(t * 7),
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 170 }, to: { x: 428, y: 284 },
+            accent: "amber", dashed: true, progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 170 }, to: { x: 428, y: 284 },
+            t: t, count: 4, speed: 1.1, accent: "amber",
+          });
+          P.node(svg, {
+            x: 228, y: 292, w: 400, h: 120,
+            title: "API Gateway", subtitle: "no rate limit",
+            icon: "unlock", accent: "crimson", badge: "OPEN",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 418 }, to: { x: 428, y: 532 },
+            accent: "crimson", progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 418 }, to: { x: 428, y: 532 },
+            t: t, count: 3, speed: 1.0, accent: "crimson",
+          });
+          P.node(svg, {
+            x: 228, y: 540, w: 400, h: 118,
+            title: "App Server", subtitle: "CPU hitting 100%",
+            icon: "server", accent: "neutral",
+          });
+          P.gauge(svg, {
+            x: 168, y: 696, w: 520,
+            label: "DEFENSE", valueText: "0 / 4", ratio: 0.06, accent: "amber",
+          });
+          return;
+        }
+
+        if (id === "b02_v1_build") {
+          const count = Math.min(100, Math.round(20 + p * 75));
+          P.node(svg, {
+            x: 228, y: 42, w: 400, h: 114,
+            title: "API Client", subtitle: "minute 00:00..00:59",
+            icon: "user", accent: "cyan", badge: "v1.0",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 244 },
+            accent: "cyan", progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 244 },
+            t: t, count: 3, speed: 0.8, accent: "cyan",
+          });
+          P.codeCard(svg, {
+            x: 108, y: 252, w: 640,
+            title: "Fixed 60s Window (v1.0)",
+            lines: [
+              "win = floor(ts / 60)",
+              "count[win] += 1",
+              "allow if count <= 100",
+            ],
+            highlightLine: Math.floor(p * 3) % 3,
+            accent: "cyan",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 462 }, to: { x: 428, y: 540 },
+            accent: "cyan", progress: ease,
+          });
+          P.node(svg, {
+            x: 228, y: 548, w: 400, h: 112,
+            title: "API Backend", subtitle: "count=" + count + " / 100",
+            icon: "server", accent: "cyan",
+          });
+          P.gauge(svg, {
+            x: 168, y: 696, w: 520,
+            label: "WINDOW QUOTA", valueText: count + " / 100", ratio: count / 100, accent: "cyan",
+          });
+          return;
+        }
+
+        if (id === "b03_v1_fail") {
+          P.node(svg, {
+            x: 208, y: 42, w: 440, h: 114,
+            title: "Bot Boundary Attack", subtitle: "burst across :59 -> :01",
+            icon: "attacker", accent: "crimson", badge: "BREACH",
+            pulse: 0.6 + 0.4 * Math.sin(t * 10),
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 260 },
+            accent: "crimson", strokeWidth: 6,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 260 },
+            t: t, count: 5, speed: 1.5, accent: "crimson",
+          });
+          P.tableCard(svg, {
+            x: 108, y: 268, w: 640,
+            title: "Window Counter (v1.0)",
+            columns: ["timestamp", "allowed"],
+            rows: [
+              ["00:59 sec", "100 / 100 PASS"],
+              ["01:01 sec", "100 / 100 PASS"],
+            ],
+            highlightRows: [0, 1],
+            cracked: true,
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 492 }, to: { x: 428, y: 552 },
+            accent: "crimson", strokeWidth: 5,
+          });
+          P.node(svg, {
+            x: 228, y: 560, w: 400, h: 110,
+            title: "API Overloaded", subtitle: "2x traffic passed!",
+            icon: "warning", accent: "crimson",
+          });
+          P.failureStamp(svg, {
+            text: "BOUNDARY BURST", x: 428, y: 392, progress: Math.min(1, p * 2.5),
+          });
+          P.gauge(svg, {
+            x: 168, y: 700, w: 520,
+            label: "2S SPIKE", valueText: "200 / 100", ratio: 1.0, accent: "crimson",
+          });
+          return;
+        }
+
+        if (id === "b04_v2_upgrade") {
+          P.node(svg, {
+            x: 228, y: 42, w: 400, h: 112,
+            title: "Incoming Traffic", subtitle: "rolling 60s check",
+            icon: "user", accent: "cyan", badge: "v2.0",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 160 }, to: { x: 428, y: 242 },
+            accent: "cyan", progress: ease,
+          });
+          P.shieldAura(svg, {
+            x: 96, y: 238, w: 664, h: 294, t: t, progress: ease, accent: "emerald",
+          });
+          P.tableCard(svg, {
+            x: 108, y: 250, w: 640,
+            title: "Sliding 60s Log (v2.0)",
+            columns: ["timestamp", "decision"],
+            rows: [
+              ["00:59.2s", "COUNTED (100th)"],
+              ["01:00.4s", "429 BLOCKED"],
+              ["01:01.1s", "429 BLOCKED"],
+            ],
+            highlightRows: [Math.min(2, Math.floor(p * 3))],
+            accent: "emerald",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 526 }, to: { x: 428, y: 582 },
+            accent: "emerald", progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 160 }, to: { x: 428, y: 242 },
+            t: t, count: 3, speed: 0.9, accent: "emerald", blockedAt: 0.78,
+          });
+          P.node(svg, {
+            x: 228, y: 590, w: 400, h: 102,
+            title: "API Protected", subtitle: "no boundary spikes",
+            icon: "shield", accent: "emerald",
+          });
+          P.gauge(svg, {
+            x: 168, y: 714, w: 520,
+            label: "BOUNDARY LEAK", valueText: "0 BYPASS", ratio: 0.96, accent: "emerald",
+          });
+          return;
+        }
+
+        if (id === "b05_v2_fail") {
+          const ramRatio = Math.min(0.99, 0.65 + p * 0.34);
+          P.node(svg, {
+            x: 208, y: 42, w: 440, h: 114,
+            title: "1M Attack Clients", subtitle: "flooding log storage",
+            icon: "attacker", accent: "crimson", badge: "FLOOD",
+            pulse: 0.5 + 0.5 * Math.sin(t * 11),
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 248 },
+            accent: "crimson", strokeWidth: 5,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 162 }, to: { x: 428, y: 248 },
+            t: t, count: 5, speed: 1.4, accent: "crimson",
+          });
+          P.codeCard(svg, {
+            x: 108, y: 256, w: 640,
+            title: "Per-User Timestamp Array",
+            lines: [
+              "log[user].push(t_now)",
+              "1M users * 10K hits",
+              "= 80 GB Timestamp RAM",
+            ],
+            highlightLine: Math.floor(p * 3) % 3,
+            accent: "crimson",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 464 }, to: { x: 428, y: 546 },
+            accent: "crimson", strokeWidth: 5,
+          });
+          P.node(svg, {
+            x: 228, y: 554, w: 400, h: 112,
+            title: "Memory Exhausted", subtitle: "Redis & API stalled",
+            icon: "database", accent: "crimson",
+          });
+          P.failureStamp(svg, {
+            text: "OUT OF MEMORY", x: 428, y: 368, progress: Math.min(1, p * 2.5),
+          });
+          P.gauge(svg, {
+            x: 168, y: 698, w: 520,
+            label: "RAM USAGE", valueText: Math.round(ramRatio * 100) + "% OOM", ratio: ramRatio, accent: "crimson",
+          });
+          return;
+        }
+
+        if (id === "b06_v3_upgrade") {
+          P.node(svg, {
+            x: 228, y: 42, w: 400, h: 112,
+            title: "Incoming Traffic", subtitle: "refill 1.6 tok/sec",
+            icon: "user", accent: "cyan", badge: "v3.0",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 160 }, to: { x: 428, y: 244 },
+            accent: "cyan", progress: ease,
+          });
+          P.shieldAura(svg, {
+            x: 96, y: 240, w: 664, h: 226, t: t, progress: ease, accent: "emerald",
+          });
+          P.codeCard(svg, {
+            x: 108, y: 252, w: 640,
+            title: "Token Bucket State (v3.0)",
+            lines: [
+              "tokens = min(100, +rate*dt)",
+              "if tokens >= 1: tokens -= 1",
+              "state = { tokens, last_ts }",
+            ],
+            highlightLine: Math.floor(p * 3) % 3,
+            accent: "emerald",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 462 }, to: { x: 428, y: 544 },
+            accent: "emerald", progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 428, y: 462 }, to: { x: 428, y: 544 },
+            t: t, count: 3, speed: 0.9, accent: "emerald", blockedAt: 0.72,
+          });
+          P.node(svg, {
+            x: 228, y: 552, w: 400, h: 112,
+            title: "16 Bytes / User", subtitle: "O(1) constant RAM",
+            icon: "cpu", accent: "emerald",
+          });
+          P.gauge(svg, {
+            x: 168, y: 698, w: 520,
+            label: "MEMORY PER USER", valueText: "2 NUMBERS", ratio: 0.95, accent: "emerald",
+          });
+          return;
+        }
+
+        if (id === "b07_v3_fail") {
+          P.node(svg, {
+            x: 208, y: 42, w: 440, h: 110,
+            title: "Bot Cluster Fan-Out", subtitle: "round-robin attack",
+            icon: "attacker", accent: "crimson", badge: "10 NODES",
+            pulse: 0.5 + 0.5 * Math.sin(t * 9),
+          });
+          const targets = [
+            { x: 20, cx: 148, name: "Node #1" },
+            { x: 300, cx: 428, name: "Node #2" },
+            { x: 580, cx: 708, name: "Node #10" },
+          ];
+          targets.forEach(function (nodeSpec) {
+            P.pipe(svg, {
+              from: { x: 428, y: 158 }, to: { x: nodeSpec.cx, y: 242 },
+              accent: "crimson", strokeWidth: 4,
+            });
+            P.packetFlow(svg, {
+              from: { x: 428, y: 158 }, to: { x: nodeSpec.cx, y: 242 },
+              t: t, count: 2, speed: 1.25, accent: "crimson",
+            });
+            P.node(svg, {
+              x: nodeSpec.x, y: 248, w: 256, h: 128,
+              title: nodeSpec.name, subtitle: "quota: 100",
+              icon: "server", accent: "amber",
+            });
+          });
+          P.tableCard(svg, {
+            x: 88, y: 422, w: 680,
+            title: "Cluster Quota Leak",
+            columns: ["scope", "allowed"],
+            rows: [
+              ["10 Local Nodes", "100 / node"],
+              ["Cluster Total", "1,000 (10X!)"],
+            ],
+            highlightRows: [1],
+            cracked: true,
+          });
+          P.failureStamp(svg, {
+            text: "10X BYPASS", x: 428, y: 544, progress: Math.min(1, p * 2.5),
+          });
+          P.gauge(svg, {
+            x: 168, y: 696, w: 520,
+            label: "EFFECTIVE QUOTA", valueText: "1000 / 100", ratio: 1.0, accent: "crimson",
+          });
+          return;
+        }
+
+        if (id === "b08_v4_upgrade") {
+          P.node(svg, {
+            x: 64, y: 48, w: 340, h: 118,
+            title: "API Node #1", subtitle: "stateless worker",
+            icon: "server", accent: "cyan",
+          });
+          P.node(svg, {
+            x: 452, y: 48, w: 340, h: 118,
+            title: "API Node #N", subtitle: "stateless worker",
+            icon: "server", accent: "cyan",
+          });
+          P.pipe(svg, {
+            from: { x: 234, y: 172 }, to: { x: 428, y: 266 },
+            accent: "cyan", progress: ease,
+          });
+          P.pipe(svg, {
+            from: { x: 622, y: 172 }, to: { x: 428, y: 266 },
+            accent: "cyan", progress: ease,
+          });
+          P.packetFlow(svg, {
+            from: { x: 234, y: 172 }, to: { x: 428, y: 266 },
+            t: t, count: 2, speed: 0.9, accent: "cyan",
+          });
+          P.packetFlow(svg, {
+            from: { x: 622, y: 172 }, to: { x: 428, y: 266 },
+            t: t, count: 2, speed: 0.9, accent: "cyan",
+          });
+          P.shieldAura(svg, {
+            x: 96, y: 260, w: 664, h: 226, t: t, progress: ease, accent: "emerald",
+          });
+          P.codeCard(svg, {
+            x: 108, y: 272, w: 640,
+            title: "Redis Atomic Lua (v4.0)",
+            lines: [
+              "EVALSHA token_bucket.lua",
+              "GET + REFILL + DECR in 1 RTT",
+              "ZERO CLUSTER RACE CONDITION",
+            ],
+            highlightLine: Math.floor(p * 3) % 3,
+            accent: "emerald",
+          });
+          P.pipe(svg, {
+            from: { x: 428, y: 482 }, to: { x: 428, y: 562 },
+            accent: "emerald", progress: ease,
+          });
+          P.node(svg, {
+            x: 188, y: 570, w: 480, h: 112,
+            title: "Single Global Truth", subtitle: "exact across 1..N servers",
+            icon: "database", accent: "emerald", badge: "v4.0",
+          });
+          P.gauge(svg, {
+            x: 168, y: 706, w: 520,
+            label: "CLUSTER SYNC", valueText: "100% ATOMIC", ratio: 1.0, accent: "emerald",
+          });
+          return;
+        }
+
+        // b09_payoff
+        P.tableCard(svg, {
+          x: 78, y: 42, w: 700,
+          title: "Rate Limiter Evolution (v1 -> v4)",
+          columns: ["version", "bottleneck fixed"],
+          rows: [
+            ["v1 Fixed Window", "2x Boundary Spike"],
+            ["v2 Sliding Log", "RAM Explosion"],
+            ["v3 Local Bucket", "10x Cluster Leak"],
+            ["v4 Redis Lua", "16B Atomic Limit"],
+          ],
+          highlightRows: [3],
+          accent: "emerald",
+        });
+        P.pipe(svg, {
+          from: { x: 428, y: 372 }, to: { x: 428, y: 454 },
+          accent: "emerald", progress: ease,
+        });
+        P.packetFlow(svg, {
+          from: { x: 428, y: 372 }, to: { x: 428, y: 454 },
+          t: t, count: 3, speed: 0.75, accent: "emerald",
+        });
+        P.shieldAura(svg, {
+          x: 156, y: 444, w: 544, h: 160, t: t, progress: 1, accent: "emerald",
+        });
+        P.node(svg, {
+          x: 178, y: 462, w: 500, h: 124,
+          title: "Resilient API Limiter", subtitle: "tiny state + global truth",
+          icon: "shield", accent: "emerald", badge: "LOCKED",
+          pulse: 0.35 + 0.25 * Math.sin(t * 4),
+        });
+        P.gauge(svg, {
+          x: 168, y: 682, w: 520,
+          label: "PRODUCTION SLA", valueText: "RESILIENT", ratio: 1.0, accent: "emerald",
+        });
+      }
+
+      window.CM.bootScene({ renderStage: renderStage });
+    })();
+  </script>
+</body>
+</html>

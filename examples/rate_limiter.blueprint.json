@@ -1,0 +1,164 @@
+{
+  "schema_version": "1.0",
+  "slug": "rate-limiter",
+  "title": "Building an API Rate Limiter From Scratch",
+  "topic_domain": "systems",
+  "format": "short_9x16",
+  "core_premise": "Naive API counters break under boundary traffic spikes, timestamp memory explosions, and multi-server race conditions until you centralize token buckets inside atomic Redis scripts.",
+  "persistent_subject": "One persistent API traffic pipeline connecting Clients, API Nodes, and Rate Limiter State that evolves from v1.0 to v4.0.",
+  "target_audience": "curious software developers and CS learners",
+  "voice": {
+    "voice_name": "Charon",
+    "style_prompt": "Crisp, energetic systems-engineering explainer with urgent tension on crashes and clean relief on upgrades.",
+    "target_wpm": 165
+  },
+  "beats": [
+    {
+      "id": "b01_hook",
+      "kind": "hook",
+      "version_label": "v0.1",
+      "system_status": "initializing",
+      "narration": "How do servers stop millions of bots crashing an API?",
+      "on_screen_headline": "Stopping API Bot Floods",
+      "visual_state": "Dark blueprint pipeline showing a Bot Swarm flooding through an unguarded API Gateway toward the App Server.",
+      "visual_diff": "Reveal initial Bot Swarm -> API Gateway -> App Server silhouette with unlimited traffic warning.",
+      "metric_callout": { "label": "TRAFFIC", "value": "UNLIMITED", "severity": "neutral" },
+      "pause_after_ms": 150,
+      "sfx": [{ "cue": "pop_build", "at": "start", "gain_db": -12.0 }]
+    },
+    {
+      "id": "b02_v1_build",
+      "kind": "build",
+      "version_label": "v1.0",
+      "system_status": "building",
+      "narration": "Step one: count every user's requests inside a fixed sixty-second window bucket.",
+      "on_screen_headline": "v1: Fixed 60s Window",
+      "visual_state": "v1.0 pipeline inserts a Fixed 60s Window counter card capping each user at 100 requests per minute.",
+      "visual_diff": "Insert v1.0 Fixed 60s Window counter block between Client Traffic and API Backend.",
+      "metric_callout": { "label": "LIMIT", "value": "100 / MIN", "severity": "warn" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "pop_build", "at": "start", "gain_db": -12.0 },
+        { "cue": "tick_data", "at": "mid", "gain_db": -14.0 }
+      ]
+    },
+    {
+      "id": "b03_v1_fail",
+      "kind": "fail",
+      "version_label": "v1.0",
+      "system_status": "compromised",
+      "narration": "Bots hammer the boundary: one hundred hits at second fifty-nine and double-spike right past reset!",
+      "on_screen_headline": "2x Spike Crushes Server",
+      "visual_state": "Red breach view showing 100 requests at 0:59 and 100 more at 1:01 both passing v1.0 into an overloaded API.",
+      "visual_diff": "Flood boundary table rows with 200 hits in 2 seconds and slam BOUNDARY BURST stamp.",
+      "metric_callout": { "label": "BURST", "value": "200 / 2S", "severity": "danger" },
+      "failure_stamp": "BOUNDARY BURST",
+      "stress_test_trigger": "Bot sends 100 requests at 0:59 and 100 more at 1:01",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "riser_stress", "at": "start", "gain_db": -13.0 },
+        { "cue": "impact_fail", "at": 0.45, "gain_db": -10.0 },
+        { "cue": "stamp_hit", "at": 0.6, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b04_v2_upgrade",
+      "kind": "upgrade",
+      "version_label": "v2.0",
+      "system_status": "upgraded",
+      "narration": "Fix one: store every exact timestamp in a sorted log so no boundary spike sneaks past.",
+      "on_screen_headline": "v2: Sliding Timestamp Log",
+      "visual_state": "v2.0 Sliding Log table tracks individual timestamps and drops requests inside any rolling 60-second window.",
+      "visual_diff": "Upgrade counter to emerald-shielded Sliding 60s Log table blocking extra packets cleanly.",
+      "metric_callout": { "label": "ACCURACY", "value": "EXACT", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "chime_fix", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b05_v2_fail",
+      "kind": "fail",
+      "version_label": "v2.0",
+      "system_status": "compromised",
+      "narration": "Under heavy traffic, saving millions of rejected timestamps explodes server memory and stalls every lookup!",
+      "on_screen_headline": "Log Eats All Server RAM",
+      "visual_state": "1M attack clients flood the timestamp log to 80 GB, pushing memory gauge to 99% OOM with crimson crash stamp.",
+      "visual_diff": "Spike memory allocation card to 99% OOM and stamp OUT OF MEMORY over crashed server.",
+      "metric_callout": { "label": "RAM LOAD", "value": "99% OOM", "severity": "danger" },
+      "failure_stamp": "OUT OF MEMORY",
+      "stress_test_trigger": "One million attacking clients force storage of rejected timestamps",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "pulse_load", "at": "start", "gain_db": -13.0 },
+        { "cue": "glitch_error", "at": 0.5, "gain_db": -11.0 },
+        { "cue": "stamp_hit", "at": 0.65, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b06_v3_upgrade",
+      "kind": "upgrade",
+      "version_label": "v3.0",
+      "system_status": "upgraded",
+      "narration": "Fix two: store just two numbers per user with a token bucket refilling smoothly over time.",
+      "on_screen_headline": "v3: Token Bucket Counter",
+      "visual_state": "v3.0 Token Bucket card replaces the huge timestamp array with two numbers (tokens + last_ts) in 16 bytes.",
+      "visual_diff": "Replace bloated timestamp array with glowing v3.0 Token Bucket 16-byte state card.",
+      "metric_callout": { "label": "MEMORY", "value": "2 NUMBERS", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "pop_build", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b07_v3_fail",
+      "kind": "fail",
+      "version_label": "v3.0",
+      "system_status": "compromised",
+      "narration": "Scale to ten servers and bots hit every node cleanly, bypassing your limit ten times over!",
+      "on_screen_headline": "Cluster Multiplies Quota 10x",
+      "visual_state": "BotCluster spreads hits across 10 independent API nodes with separate local counters, leaking 1,000 requests instead of 100.",
+      "visual_diff": "Split single server into 3 parallel local-bucket nodes leaking 10X quota with 10X BYPASS stamp.",
+      "metric_callout": { "label": "LEAKED", "value": "10X QUOTA", "severity": "danger" },
+      "failure_stamp": "10X BYPASS",
+      "stress_test_trigger": "Bot cluster spreads requests across ten API nodes with isolated local buckets",
+      "pause_after_ms": 220,
+      "sfx": [
+        { "cue": "alarm_breach", "at": "start", "gain_db": -12.0 },
+        { "cue": "impact_fail", "at": 0.45, "gain_db": -10.0 },
+        { "cue": "stamp_hit", "at": 0.6, "gain_db": -11.0 }
+      ]
+    },
+    {
+      "id": "b08_v4_upgrade",
+      "kind": "upgrade",
+      "version_label": "v4.0",
+      "system_status": "upgraded",
+      "narration": "Fix three: centralize token buckets inside atomic Redis scripts so every server checks one truth.",
+      "on_screen_headline": "v4: Atomic Redis Buckets",
+      "visual_state": "All API nodes converge into one shared Redis Atomic Lua Engine executing race-free token updates in a single step.",
+      "visual_diff": "Converge parallel API nodes into shielded Redis Atomic Lua Engine with Single Global Truth.",
+      "metric_callout": { "label": "SYNC", "value": "ATOMIC LUA", "severity": "good" },
+      "pause_after_ms": 180,
+      "sfx": [
+        { "cue": "lock_upgrade", "at": "start", "gain_db": -11.0 },
+        { "cue": "whoosh", "at": "mid", "gain_db": -13.0 }
+      ]
+    },
+    {
+      "id": "b09_payoff",
+      "kind": "payoff",
+      "version_label": "v4.0",
+      "system_status": "resilient",
+      "narration": "Fixed windows to atomic Redis buckets: great rate limiters trade tiny state for cluster-wide certainty.",
+      "on_screen_headline": "Cluster-Wide Traffic Control",
+      "visual_state": "Architecture evolution ribbon comparing v1-v4 flows into a shielded Resilient API Limiter production SLA badge.",
+      "visual_diff": "Show v1 to v4 progression table feeding locked Resilient API Limiter badge.",
+      "metric_callout": { "label": "STATUS", "value": "RESILIENT", "severity": "good" },
+      "pause_after_ms": 250,
+      "sfx": [{ "cue": "chime_fix", "at": "start", "gain_db": -10.0 }]
+    }
+  ]
+}
