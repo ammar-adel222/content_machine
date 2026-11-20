@@ -41,6 +41,7 @@ from cm.tts import (
     assemble_voice_track,
     compute_cache_key,
     is_fallback_worthy_error,
+    model_supports_speech_metadata,
     normalize_tts_bytes_to_wav,
     parse_pcm_rate,
     read_wav_duration_sec,
@@ -207,11 +208,16 @@ def test_tts_helpers_normalization_and_mocked_gemini(
                 ],
             )
 
+    assert model_supports_speech_metadata("gemini-3.8-flash-tts") is True
+    assert model_supports_speech_metadata("gemini-3.8-flash-lite-tts") is True
+    assert model_supports_speech_metadata("gemini-3.1-flash-tts-preview") is False
+    assert model_supports_speech_metadata("gemini-2.5-flash-preview-tts") is False
+
     monkeypatch.setattr("google.genai.Client", FakeClient)
     gem_out = tmp_path / "gemini_clip.wav"
     gem_dur = synthesize_gemini_clip(
-        narration="Test narration",
-        model="gemini-2.5-flash-preview-tts",
+        narration="  Test narration  ",
+        model="gemini-3.8-flash-tts",
         voice_name="Charon",
         style_prompt="Fast and clear",
         api_key="test-key",
@@ -219,7 +225,22 @@ def test_tts_helpers_normalization_and_mocked_gemini(
     )
     assert gem_dur == pytest.approx(0.5, abs=0.05)
     assert client_http_options == [{"api_version": "v1beta"}]
-    assert "Speak in this style: Fast and clear" in calls[0]["contents"]
+    part = calls[0]["contents"][0].parts[0]
+    assert part.text == "Test narration"
+    assert part.speech_metadata is not None
+    assert part.speech_metadata.style == "Fast and clear"
+
+    # Legacy 2.5 / 3.1 models omit speech_metadata and never inject style text aloud
+    gem_legacy = tmp_path / "gemini_clip_legacy.wav"
+    synthesize_gemini_clip(
+        narration="Test narration",
+        model="gemini-2.5-flash-preview-tts",
+        voice_name="Charon",
+        style_prompt="Fast and clear",
+        api_key="test-key",
+        out_wav=gem_legacy,
+    )
+    assert calls[1]["contents"] == "Test narration"
 
     # Empty Gemini response raises clear RuntimeError
     class EmptyClient:
@@ -578,7 +599,7 @@ def test_gemini_tts_strongest_first_cascade_and_env_isolation(
     assert all(m != "ignored-env-model" for _, m, _ in attempts_1)
     assert all(sp != "Ignored env tone" for _, _, sp in attempts_1)
 
-    # 2. Multi-hop downgrade all the way to #3
+    # 2. Multi-hop downgrade all the way to the final fallback model
     attempts_2: list[str] = []
 
     def fake_gemini_multi_hop(
@@ -591,20 +612,20 @@ def test_gemini_tts_strongest_first_cascade_and_env_isolation(
     ) -> float:
         _ = (narration, voice_name, style_prompt, api_key)
         attempts_2.append(model)
-        if model == GEMINI_TTS_MODEL_CASCADE[0]:
-            raise _HttpError(429, "Quota exceeded")
-        if model == GEMINI_TTS_MODEL_CASCADE[1]:
-            raise _HttpError(404, "Model not found")
+        if model in GEMINI_TTS_MODEL_CASCADE[:-1]:
+            idx = GEMINI_TTS_MODEL_CASCADE.index(model)
+            raise _HttpError(429 if idx % 2 == 0 else 404, f"Unavailable: {model}")
         return normalize_tts_bytes_to_wav(
             pcm_bytes, "audio/L16;codec=pcm;rate=24000", out_wav
         )
 
     monkeypatch.setattr("cm.tts.synthesize_gemini_clip", fake_gemini_multi_hop)
     tl_hop = synthesize_run_tts("cascade-run", provider=TtsProvider.GEMINI, force=True)
-    assert tl_hop.model == GEMINI_TTS_MODEL_CASCADE[2]
-    assert len(tl_hop.fallback_events) == 2
-    assert attempts_2[:3] == list(GEMINI_TTS_MODEL_CASCADE)
-    assert all(m == GEMINI_TTS_MODEL_CASCADE[2] for m in attempts_2[3:])
+    n_models = len(GEMINI_TTS_MODEL_CASCADE)
+    assert tl_hop.model == GEMINI_TTS_MODEL_CASCADE[-1]
+    assert len(tl_hop.fallback_events) == n_models - 1
+    assert attempts_2[:n_models] == list(GEMINI_TTS_MODEL_CASCADE)
+    assert all(m == GEMINI_TTS_MODEL_CASCADE[-1] for m in attempts_2[n_models:])
 
     # 3. Exhausting ALL models raises clear RuntimeError
     def fake_gemini_all_exhausted(**kwargs) -> float:

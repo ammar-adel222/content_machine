@@ -30,10 +30,18 @@ from cm.state import load_state
 DEFAULT_SAMPLE_RATE = 48000
 DEFAULT_LEAD_IN_MS = 120
 GEMINI_TTS_MODEL_CASCADE: tuple[str, ...] = (
+    "gemini-3.8-flash-tts",
+    "gemini-3.8-flash-lite-tts",
     "gemini-2.5-pro-preview-tts",
     "gemini-3.1-flash-tts-preview",
     "gemini-2.5-flash-preview-tts",
 )
+
+
+def model_supports_speech_metadata(model: str) -> bool:
+    """Return True for Gemini TTS models that accept structured Part.speech_metadata."""
+    lowered = model.lower()
+    return "2.5" not in lowered and "3.1" not in lowered
 
 
 def is_fallback_worthy_error(exc: Exception) -> bool:
@@ -244,18 +252,30 @@ def synthesize_gemini_clip(
     from google import genai
     from google.genai import types
 
-    prompt = (
-        f"Speak in this style: {style_prompt.strip()}\n\n{narration}"
-        if style_prompt and style_prompt.strip()
-        else narration
-    )
+    narration_text = narration.strip()
+    clean_style = style_prompt.strip() if style_prompt else ""
+    if clean_style and model_supports_speech_metadata(model):
+        contents: object = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        text=narration_text,
+                        speech_metadata=types.SpeechMetadata(style=clean_style),
+                    )
+                ],
+            )
+        ]
+    else:
+        contents = narration_text
+
     client = genai.Client(
         api_key=api_key,
         http_options={"api_version": "v1beta"},
     )
     response = client.models.generate_content(
         model=model,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
