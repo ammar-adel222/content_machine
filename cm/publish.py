@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -229,6 +230,7 @@ def authenticate_youtube(
     open_browser: bool = True,
     timeout_sec: float = 180.0,
     port: int = 0,
+    on_auth_url: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     """Run local loopback OAuth 2.0 PKCE authorization and save YOUTUBE_TOKEN_FILE."""
     load_env(root)
@@ -291,6 +293,8 @@ def authenticate_youtube(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        if on_auth_url is not None:
+            on_auth_url(auth_url)
         if open_browser:  # pragma: no cover
             webbrowser.open(auth_url)
         received = done_event.wait(timeout=timeout_sec)

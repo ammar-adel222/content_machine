@@ -1062,11 +1062,16 @@ def auth_youtube_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON summary"),
 ) -> None:
     """Authenticate YouTube OAuth 2.0 (PKCE) via browser and save refresh token."""
+
+    def _announce_auth_url(url: str) -> None:
+        print(f"Open this URL in your browser to authorize YouTube:\n{url}", flush=True)
+
     try:
         summary = authenticate_youtube(
             open_browser=not no_browser,
             timeout_sec=timeout,
             port=port,
+            on_auth_url=None if as_json else _announce_auth_url,
         )
     except (FileNotFoundError, ValueError, RuntimeError, TimeoutError) as exc:
         _fail(str(exc), as_json)

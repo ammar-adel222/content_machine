@@ -238,7 +238,11 @@ def test_youtube_oauth_pkce_flow_and_token_refresh(
         return _fake_open
 
     monkeypatch.setattr("cm.publish.webbrowser.open", _trigger_callback())
-    summary = authenticate_youtube(open_browser=True, timeout_sec=5.0)
+    announced: list[str] = []
+    summary = authenticate_youtube(open_browser=True, timeout_sec=5.0, on_auth_url=announced.append)
+    assert len(announced) == 1
+    assert "code_challenge_method=S256" in announced[0]
+    assert "csec-456" not in announced[0]
     assert summary["has_refresh_token"] is True
     assert token_path.is_file()
     saved_tok = json.loads(token_path.read_text(encoding="utf-8"))
@@ -787,18 +791,25 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     assert "[WARN]" in res_warn_cli.output
 
     # CLI auth youtube & error paths
-    monkeypatch.setattr(
-        "cm.cli.authenticate_youtube",
-        lambda **_kw: {
+    def _fake_auth_yt(**kw: object) -> dict[str, object]:
+        cb = kw.get("on_auth_url")
+        if callable(cb):
+            cb("https://accounts.google.com/o/oauth2/v2/auth?x=1")
+        return {
             "token_path": str(tmp_path / "secrets" / "youtube_token.json"),
             "has_refresh_token": True,
             "scopes": [],
             "expires_at": "2030-01-01T00:00:00Z",
             "auth_url": "https://accounts.google.com/...",
-        },
-    )
-    assert runner.invoke(app, ["auth", "youtube", "--no-browser"]).exit_code == 0
-    assert runner.invoke(app, ["auth", "youtube", "--json"]).exit_code == 0
+        }
+
+    monkeypatch.setattr("cm.cli.authenticate_youtube", _fake_auth_yt)
+    res_yt_text = runner.invoke(app, ["auth", "youtube", "--no-browser"])
+    assert res_yt_text.exit_code == 0
+    assert "Open this URL in your browser" in res_yt_text.output
+    res_yt_json = runner.invoke(app, ["auth", "youtube", "--json"])
+    assert res_yt_json.exit_code == 0
+    assert "Open this URL in your browser" not in res_yt_json.output
 
     monkeypatch.setattr(
         "cm.cli.authenticate_youtube",
