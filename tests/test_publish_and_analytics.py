@@ -33,8 +33,13 @@ from cm.models import (
 )
 from cm.paths import atomic_write_text, run_dir
 from cm.publish import (
+    authenticate_instagram,
     authenticate_youtube,
     build_publish_metadata,
+    check_instagram_connection,
+    discover_instagram_accounts,
+    exchange_instagram_long_lived_token,
+    get_instagram_profile,
     get_youtube_access_token,
     http_json,
     http_request,
@@ -43,6 +48,7 @@ from cm.publish import (
     redact_secrets,
     resolve_youtube_secret_paths,
     stage_mp4_for_instagram,
+    update_env_file,
     upload_instagram_reel,
     upload_youtube_video,
 )
@@ -86,12 +92,18 @@ def _make_valid_mp4(out_mp4: Path) -> Path:
 
 def test_secret_redaction_and_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     masked = redact_secrets(
-        'https://x.test?key=KEY123&access_token=TOK999 {"refresh_token": "REF77", "client_secret": "SEC"}'
+        'https://x.test?key=KEY123&access_token=TOK999&fb_exchange_token=FBEX11 '
+        'Authorization: OAuth IGOAUTH77 Authorization: Bearer YTBEAR88 '
+        '{"refresh_token": "REF77", "client_secret": "SEC", "fb_exchange_token": "FBJSON"}'
     )
     assert "KEY123" not in masked
     assert "TOK999" not in masked
+    assert "FBEX11" not in masked
+    assert "IGOAUTH77" not in masked
+    assert "YTBEAR88" not in masked
     assert "REF77" not in masked
     assert "SEC" not in masked
+    assert "FBJSON" not in masked
 
     class _Resp:
         def __init__(self, status: int, headers: dict[str, str], body: bytes) -> None:
@@ -315,8 +327,11 @@ def test_metadata_staging_sigv4_and_uploaders(
     assert stage_mp4_for_instagram("meta-run", mp4, video_url_override=" https://cdn.test/v.mp4 ") == "https://cdn.test/v.mp4"
 
     monkeypatch.setenv("IG_STAGING_PROVIDER", "none")
-    with pytest.raises(ValueError, match="public MP4 URL"):
-        stage_mp4_for_instagram("meta-run", mp4)
+    assert stage_mp4_for_instagram("meta-run", mp4) is None
+    monkeypatch.setenv("IG_STAGING_PROVIDER", "direct")
+    assert stage_mp4_for_instagram("meta-run", mp4) is None
+    monkeypatch.delenv("IG_STAGING_PROVIDER", raising=False)
+    assert stage_mp4_for_instagram("meta-run", mp4) is None
 
     monkeypatch.setenv("IG_STAGING_PROVIDER", "public_url")
     monkeypatch.delenv("IG_STAGING_PUBLIC_BASE_URL", raising=False)
@@ -451,6 +466,75 @@ def test_metadata_staging_sigv4_and_uploaders(
     with pytest.raises(RuntimeError, match="media_publish"):
         upload_instagram_reel("u", "c", "id", "tok", poll_interval_sec=0.0, max_polls=2)
 
+    # Direct local binary upload via upload_type=resumable + rupload.facebook.com
+    rupload_calls: list[tuple[str, bytes | None, dict[str, str]]] = []
+    create_payloads: list[dict[str, str]] = []
+
+    def _fake_direct_json(
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> object:
+        _ = (method, headers, timeout)
+        if url.endswith("/media"):
+            parsed = dict(urllib.parse.parse_qsl((data or b"").decode("utf-8")))
+            create_payloads.append(parsed)
+            if len(create_payloads) == 1:
+                return {"id": "cont-dir-1", "uri": "https://rupload.facebook.com/ig-api-upload/v21.0/cont-dir-1"}
+            return {"id": "cont-no-uri"}
+        if "fields=status_code" in url:
+            return {"status_code": "FINISHED"}
+        if url.endswith("/media_publish"):
+            return {"id": "ig-dir-999"}
+        if "fields=permalink" in url:
+            return {"permalink": "https://www.instagram.com/reel/DIRECT/"}
+        raise AssertionError(url)
+
+    def _fake_direct_req(
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (method, timeout)
+        rupload_calls.append((url, data, dict(headers or {})))
+        return 200, {}, b'{"success": true}'
+
+    monkeypatch.setattr("cm.publish.http_json", _fake_direct_json)
+    monkeypatch.setattr("cm.publish.http_request", _fake_direct_req)
+
+    res_direct = upload_instagram_reel(
+        None, "direct cap", "ig123", "igt", video_path=mp4, poll_interval_sec=0.0, max_polls=2
+    )
+    assert res_direct.video_id == "ig-dir-999"
+    assert res_direct.url == "https://www.instagram.com/reel/DIRECT/"
+    assert res_direct.staged_url is None
+    assert create_payloads[0]["upload_type"] == "resumable"
+    assert create_payloads[0]["media_type"] == "REELS"
+    assert "video_url" not in create_payloads[0]
+    assert rupload_calls[0][0] == "https://rupload.facebook.com/ig-api-upload/v21.0/cont-dir-1"
+    assert rupload_calls[0][1] == mp4.read_bytes()
+    assert rupload_calls[0][2]["Authorization"] == "OAuth igt"
+    assert rupload_calls[0][2]["offset"] == "0"
+    assert rupload_calls[0][2]["file_size"] == str(mp4.stat().st_size)
+    assert rupload_calls[0][2]["Content-Type"] == "application/octet-stream"
+
+    # Fallback URI when 'uri' absent from /media response
+    upload_instagram_reel(
+        "   ", "cap2", "ig123", "igt", video_path=mp4, poll_interval_sec=0.0, max_polls=2
+    )
+    assert rupload_calls[1][0] == "https://rupload.facebook.com/ig-api-upload/v21.0/cont-no-uri"
+
+    empty_mp4 = tmp_path / "empty.mp4"
+    empty_mp4.write_bytes(b"")
+    with pytest.raises(ValueError, match="empty"):
+        upload_instagram_reel(None, "c", "ig123", "igt", video_path=empty_mp4)
+    with pytest.raises(ValueError, match="requires either video_path or video_url"):
+        upload_instagram_reel(None, "c", "ig123", "igt")
+
 
 def test_publish_run_dry_run_live_analytics_sync_and_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -458,6 +542,10 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     monkeypatch.setenv("CM_ROOT", str(tmp_path))
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
     monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("IG_USER_ID", raising=False)
+    monkeypatch.delenv("INSTAGRAM_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("IG_STAGING_PROVIDER", raising=False)
 
     # Add an idea with matching slug to verify auto-PUBLISHED status transition
     idea, _ = add_idea(
@@ -496,11 +584,12 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     assert load_catalog().published == []
     assert load_state("pub-short").stages[PipelineStage.PUBLISH].status == StageStatus.PENDING
 
-    # Live CLI dry-run + schema commands
-    res_dry_cli = runner.invoke(app, ["publish", "pub-short", "--dry-run"])
+    # Live CLI dry-run + schema commands (direct Instagram dry-run notice & cp1252 check)
+    res_dry_cli = runner.invoke(app, ["publish", "pub-short", "-p", "youtube", "-p", "instagram", "--dry-run"])
     assert res_dry_cli.exit_code == 0, res_dry_cli.output
     res_dry_cli.output.encode("cp1252")
     assert "Publish (DRY-RUN)" in res_dry_cli.output
+    assert "rupload.facebook.com" in " ".join(res_dry_cli.output.split())
 
     res_pub_schema = runner.invoke(app, ["schema", "publish"])
     assert res_pub_schema.exit_code == 0
@@ -559,12 +648,14 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     assert cat.published[0].platforms["youtube"]["video_id"] == "YT_ABC123"
     assert cat.ideas[0].status == IdeaStatus.PUBLISHED
 
-    # Upsert on existing slug + Instagram live path via CLI
+    # Upsert on existing slug + Instagram live direct rupload (default) via CLI
     monkeypatch.setenv("IG_USER_ID", "ig-u1")
     monkeypatch.setenv("IG_ACCESS_TOKEN", "ig-tok-secret")
-    monkeypatch.setattr(
-        "cm.publish.upload_instagram_reel",
-        lambda **_kw: PublishReceipt.model_validate(
+    captured_ig_kwargs: list[dict[str, object]] = []
+
+    def _fake_ig_pub(**kw: object):
+        captured_ig_kwargs.append(dict(kw))
+        return PublishReceipt.model_validate(
             {
                 "slug": "pub-short",
                 "title": "t",
@@ -579,8 +670,24 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
                     }
                 ],
             }
-        ).results[0],
+        ).results[0]
+
+    monkeypatch.setattr("cm.publish.upload_instagram_reel", _fake_ig_pub)
+    res_ig_direct_cli = runner.invoke(
+        app,
+        [
+            "publish",
+            "pub-short",
+            "-p",
+            "instagram",
+            "--allow-mock-audio",
+        ],
     )
+    assert res_ig_direct_cli.exit_code == 0, res_ig_direct_cli.output
+    res_ig_direct_cli.output.encode("cp1252")
+    assert captured_ig_kwargs[0]["video_url"] is None
+    assert captured_ig_kwargs[0]["video_path"] == (run_dir("pub-short") / "final.mp4").resolve()
+
     res_ig_cli = runner.invoke(
         app,
         [
@@ -595,6 +702,8 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     )
     assert res_ig_cli.exit_code == 0, res_ig_cli.output
     res_ig_cli.output.encode("cp1252")
+    assert captured_ig_kwargs[1]["video_url"] == "https://cdn.example/final.mp4"
+    assert captured_ig_kwargs[1]["video_path"] is None
 
     # Add second published entry via record_published_entry to verify upsert + keyword dedup
     record_published_entry(
@@ -705,3 +814,358 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
 
     # Helper atomic write check inside run_dir
     assert atomic_write_text(run_dir("pub-short") / ".check", "ok").is_file()
+
+
+def test_instagram_auth_check_and_env_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CM_ROOT", str(tmp_path))
+    for key in (
+        "IG_ACCESS_TOKEN",
+        "IG_USER_ID",
+        "INSTAGRAM_ACCESS_TOKEN",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    # 1. update_env_file creates new .env, preserves comments/other keys, handles missing trailing newline
+    created_env = update_env_file({"GEMINI_API_KEY": "gk", "IG_ACCESS_TOKEN": "tok-old"}, root=tmp_path)
+    assert created_env == (tmp_path / ".env").resolve()
+    assert "IG_ACCESS_TOKEN=tok-old\n" in created_env.read_text(encoding="utf-8")
+
+    created_env.write_text("# Header comment\n\nGEMINI_API_KEY=gk\nIG_ACCESS_TOKEN=old", encoding="utf-8")
+    update_env_file({"IG_ACCESS_TOKEN": "tok-new", "IG_USER_ID": "ig-101"}, root=tmp_path)
+    env_text = created_env.read_text(encoding="utf-8")
+    assert env_text == "# Header comment\n\nGEMINI_API_KEY=gk\nIG_ACCESS_TOKEN=tok-new\nIG_USER_ID=ig-101\n"
+
+    # 2. exchange_instagram_long_lived_token
+    seen_urls: list[str] = []
+
+    def _fake_exchange_json(url: str) -> object:
+        seen_urls.append(url)
+        if "BAD_SHORT" in url:
+            return {"expires_in": 100}
+        return {"access_token": " long-tok-60d "}
+
+    monkeypatch.setattr("cm.publish.http_json", _fake_exchange_json)
+    assert exchange_instagram_long_lived_token("short-tok", "app1", "sec1") == "long-tok-60d"
+    assert "grant_type=fb_exchange_token" in seen_urls[0]
+    with pytest.raises(RuntimeError, match="missing 'access_token'"):
+        exchange_instagram_long_lived_token("BAD_SHORT", "app1", "sec1")
+
+    # 3. discover_instagram_accounts
+    monkeypatch.setattr("cm.publish.http_json", lambda *_a, **_k: ["not-dict"])
+    with pytest.raises(RuntimeError, match="non-object JSON"):
+        discover_instagram_accounts("tok")
+
+    monkeypatch.setattr("cm.publish.http_json", lambda *_a, **_k: {"data": "not-list"})
+    assert discover_instagram_accounts("tok") == ([], [])
+
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda *_a, **_k: {
+            "data": [
+                "bad-item",
+                {"id": "p1", "name": "Unlinked Page"},
+                {
+                    "id": "p2",
+                    "name": "Dev Page",
+                    "access_token": "page-tok-2",
+                    "instagram_business_account": {"id": "ig-2", "username": "devreels", "name": "Dev Reels"},
+                },
+                {
+                    "id": "p3",
+                    "name": "Fallback Page",
+                    "instagram_business_account": {"id": "ig-3", "username": "algo_lab", "name": "Algo Lab"},
+                },
+            ]
+        },
+    )
+    pages, ig_accs = discover_instagram_accounts("usr-tok")
+    assert len(pages) == 3 and not pages[0]["has_instagram"] and pages[1]["has_instagram"]
+    assert len(ig_accs) == 2
+    assert ig_accs[0]["token"] == "page-tok-2"
+    assert ig_accs[1]["token"] == "usr-tok"
+
+    # 4. get_instagram_profile
+    monkeypatch.setattr("cm.publish.http_json", lambda *_a, **_k: {})
+    with pytest.raises(RuntimeError, match="missing 'id'"):
+        get_instagram_profile("ig-2", "tok")
+
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda *_a, **_k: {"id": "ig-2", "username": "devreels", "name": "Dev Reels", "followers_count": "not-int"},
+    )
+    prof = get_instagram_profile("ig-2", "tok")
+    assert prof == {"id": "ig-2", "username": "devreels", "name": "Dev Reels", "followers_count": 0}
+
+    # 5. check_instagram_connection across all state transitions
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    st_missing = check_instagram_connection(root=tmp_path)
+    assert not st_missing["connected"] and not st_missing["has_token"]
+
+    (tmp_path / ".env").write_text("IG_ACCESS_TOKEN=bad-tok\n", encoding="utf-8")
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "bad-tok")
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("HTTP 401 access_token=bad-tok")),
+    )
+    st_invalid = check_instagram_connection(root=tmp_path)
+    assert st_invalid["has_token"] and not st_invalid["token_valid"]
+    assert "bad-tok" not in str(st_invalid["error"])
+
+    # Valid token, 0 pages
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda u, **_k: {"id": "fb1", "name": "Ammar"} if "/me?" in u else {"data": []},
+    )
+    st_nopage = check_instagram_connection(root=tmp_path)
+    assert st_nopage["token_valid"] and "No Facebook Pages found" in str(st_nopage["error"])
+
+    # Valid token, Page without IG linked
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda u, **_k: (
+            {"id": "fb1", "name": "Ammar"}
+            if "/me?" in u
+            else {"data": [{"id": "p1", "name": "Tech Page"}]}
+        ),
+    )
+    st_noig = check_instagram_connection(root=tmp_path)
+    assert "No Instagram Professional account" in str(st_noig["error"])
+
+    # Valid token, /me/accounts fails & IG_USER_ID unset
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda u, **_k: (
+            {"id": "fb1", "name": "Ammar"}
+            if "/me?" in u
+            else (_ for _ in ()).throw(RuntimeError("accounts error access_token=bad-tok"))
+        ),
+    )
+    st_acc_err = check_instagram_connection(root=tmp_path)
+    assert "accounts error" in str(st_acc_err["error"]) and "bad-tok" not in str(st_acc_err["error"])
+
+    # Valid token, 1 linked IG account but IG_USER_ID unset
+    def _one_linked(u: str, **_k: object) -> object:
+        if "/me?" in u:
+            return {"id": "fb1", "name": "Ammar"}
+        if "/me/accounts" in u:
+            return {
+                "data": [
+                    {
+                        "id": "p2",
+                        "name": "Dev Page",
+                        "access_token": "PAGE_SECRET_TOK",
+                        "instagram_business_account": {"id": "ig-2", "username": "devreels", "name": "Dev"},
+                    }
+                ]
+            }
+        return {"id": "ig-2", "username": "devreels", "name": "Dev", "followers_count": 42}
+
+    monkeypatch.setattr("cm.publish.http_json", _one_linked)
+    st_need_id = check_instagram_connection(root=tmp_path)
+    assert not st_need_id["connected"]
+    assert "IG_USER_ID is not set" in str(st_need_id["error"])
+    assert "token" not in st_need_id["accounts"][0]  # type: ignore[index]
+
+    # Valid token, 2 linked IG accounts & IG_USER_ID unset
+    def _two_linked(u: str, **_k: object) -> object:
+        if "/me?" in u:
+            return {"id": "fb1", "name": "Ammar"}
+        if "/me/accounts" in u:
+            return {
+                "data": [
+                    {"id": "p1", "name": "P1", "instagram_business_account": {"id": "ig-1", "username": "a"}},
+                    {"id": "p2", "name": "P2", "instagram_business_account": {"id": "ig-2", "username": "b"}},
+                ]
+            }
+        return {"id": "ig-1", "username": "a", "name": "A", "followers_count": 10}
+
+    monkeypatch.setattr("cm.publish.http_json", _two_linked)
+    st_multi = check_instagram_connection(root=tmp_path)
+    assert "Multiple Instagram accounts" in str(st_multi["error"])
+
+    # Profile fetch failure when IG_USER_ID set
+    monkeypatch.setenv("IG_USER_ID", "ig-2")
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda u, **_k: (
+            {"id": "fb1", "name": "Ammar"}
+            if "/me?" in u
+            else (
+                {"data": []}
+                if "/me/accounts" in u
+                else (_ for _ in ()).throw(RuntimeError("bad ig_user_id"))
+            )
+        ),
+    )
+    st_prof_err = check_instagram_connection(root=tmp_path)
+    assert not st_prof_err["connected"] and "bad ig_user_id" in str(st_prof_err["error"])
+
+    # Fully connected state + fallback env var names (INSTAGRAM_*)
+    monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("IG_USER_ID", raising=False)
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setenv("INSTAGRAM_ACCESS_TOKEN", "legacy-tok")
+    monkeypatch.setenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", "ig-2")
+    monkeypatch.setattr("cm.publish.http_json", _one_linked)
+    st_ok = check_instagram_connection(root=tmp_path)
+    assert st_ok["connected"] is True and st_ok["error"] is None
+    assert st_ok["profile"]["followers_count"] == 42  # type: ignore[index]
+
+    # 6. authenticate_instagram validation, exchange order, account selection, warnings
+    with pytest.raises(ValueError, match="cannot be blank"):
+        authenticate_instagram("   ", root=tmp_path)
+    with pytest.raises(ValueError, match="Both --app-id and --app-secret"):
+        authenticate_instagram("tok", app_id="123", root=tmp_path)
+
+    call_order: list[str] = []
+
+    def _auth_http_json(u: str, **_k: object) -> object:
+        if "/oauth/access_token" in u:
+            call_order.append("exchange")
+            assert "fb_exchange_token=short1" in u
+            return {"access_token": "ll-user-tok"}
+        if "/me/accounts" in u:
+            call_order.append("accounts")
+            expected_tok = "ll-user-tok" if "exchange" in call_order else "short1"
+            assert f"access_token={expected_tok}" in u
+            return {
+                "data": [
+                    {
+                        "id": "p1",
+                        "name": "P1",
+                        "access_token": "page-tok-1",
+                        "instagram_business_account": {"id": "ig-1", "username": "one", "name": "One"},
+                    },
+                    {
+                        "id": "p2",
+                        "name": "P2",
+                        "access_token": "page-tok-2",
+                        "instagram_business_account": {"id": "ig-2", "username": "two", "name": "Two"},
+                    },
+                ]
+            }
+        call_order.append("profile")
+        return {"id": "ig-2", "username": "two", "name": "Two", "followers_count": 77}
+
+    monkeypatch.setattr("cm.publish.http_json", _auth_http_json)
+    auth_sum = authenticate_instagram(
+        "short1", app_id="aid", app_secret="asec", account_index=1, root=tmp_path
+    )
+    assert call_order == ["exchange", "accounts", "profile"]
+    assert auth_sum["exchanged_long_lived"] is True
+    assert auth_sum["ig_user_id"] == "ig-2"
+    assert "page-tok-2" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "access_token" not in json.dumps(auth_sum)
+
+    # Invalid account index & manual ig_user_id match without exchange
+    def _no_exchange_auth_json(u: str, **_k: object) -> object:
+        if "/me/accounts" in u:
+            assert "access_token=short1" in u
+            return {
+                "data": [
+                    {
+                        "id": "p1",
+                        "name": "P1",
+                        "access_token": "page-tok-1",
+                        "instagram_business_account": {"id": "ig-1", "username": "one", "name": "One"},
+                    }
+                ]
+            }
+        return {"id": "ig-1", "username": "one", "name": "One", "followers_count": 5}
+
+    monkeypatch.setattr("cm.publish.http_json", _no_exchange_auth_json)
+    with pytest.raises(ValueError, match="Invalid --account-index"):
+        authenticate_instagram("short1", account_index=9, root=tmp_path)
+
+    matched_manual = authenticate_instagram("short1", ig_user_id="ig-1", root=tmp_path)
+    assert matched_manual["ig_user_id"] == "ig-1"
+    assert matched_manual["exchanged_long_lived"] is False
+    assert "page-tok-1" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+    # Manual ig_user_id (matched and unmatched) + profile_warning fallback
+    def _manual_and_warn(u: str, **_k: object) -> object:
+        if "/me/accounts" in u:
+            return {"data": []}
+        raise RuntimeError("profile permissions missing")
+
+    monkeypatch.setattr("cm.publish.http_json", _manual_and_warn)
+    with pytest.raises(ValueError, match="no linked Instagram Professional account"):
+        authenticate_instagram("short1", root=tmp_path)
+
+    manual_sum = authenticate_instagram("short1", ig_user_id="manual-99", root=tmp_path)
+    assert manual_sum["ig_user_id"] == "manual-99"
+    assert manual_sum["profile"] is None
+    assert "profile permissions missing" in str(manual_sum["profile_warning"])
+
+    # 7. CLI `cm auth instagram` (--check disconnected + connected, flags, interactive prompts, errors)
+    monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("IG_USER_ID", raising=False)
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    res_chk_missing = runner.invoke(app, ["auth", "instagram", "--check"])
+    assert res_chk_missing.exit_code == 0
+    assert "NOT CONNECTED" in res_chk_missing.output and "Next step:" in res_chk_missing.output
+
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "cli-tok")
+    monkeypatch.setenv("IG_USER_ID", "ig-2")
+    monkeypatch.setattr("cm.publish.http_json", _one_linked)
+
+    res_chk = runner.invoke(app, ["auth", "instagram", "--check"])
+    assert res_chk.exit_code == 0, res_chk.output
+    res_chk.output.encode("cp1252")
+    assert "CONNECTED" in res_chk.output
+    assert "cli-tok" not in res_chk.output
+
+    res_chk_json = runner.invoke(app, ["auth", "instagram", "--check", "--json"])
+    assert res_chk_json.exit_code == 0
+    assert json.loads(res_chk_json.output)["connected"] is True
+
+    monkeypatch.setattr("cm.publish.http_json", _auth_http_json)
+    call_order.clear()
+    res_flag = runner.invoke(
+        app,
+        ["auth", "instagram", "--token", "short1", "--app-id", "aid", "--app-secret", "asec", "--account-index", "1"],
+    )
+    assert res_flag.exit_code == 0, res_flag.output
+    res_flag.output.encode("cp1252")
+    assert "Verified Instagram profile: @two" in res_flag.output
+
+    call_order.clear()
+    res_flag_json = runner.invoke(
+        app, ["auth", "instagram", "--token", "short1", "--account-index", "1", "--json"]
+    )
+    assert res_flag_json.exit_code == 0
+    assert json.loads(res_flag_json.output)["ig_user_id"] == "ig-2"
+
+    # Interactive prompts (with long-lived exchange + profile_warning branch)
+    def _interactive_warn(u: str, **_k: object) -> object:
+        if "/oauth/access_token" in u:
+            return {"access_token": "ll-user-tok"}
+        if "/me/accounts" in u:
+            return {
+                "data": [
+                    {
+                        "id": "p1",
+                        "name": "P1",
+                        "instagram_business_account": {"id": "ig-1", "username": "one"},
+                    }
+                ]
+            }
+        raise RuntimeError("followers scope unavailable")
+
+    monkeypatch.setattr("cm.publish.http_json", _interactive_warn)
+    res_prompt = runner.invoke(
+        app,
+        ["auth", "instagram"],
+        input="short1\ny\naid\nasec\n",
+    )
+    assert res_prompt.exit_code == 0, res_prompt.output
+    assert "[WARN]" in res_prompt.output
+
+    res_prompt_no_ll = runner.invoke(app, ["auth", "instagram"], input="short1\nn\n")
+    assert res_prompt_no_ll.exit_code == 0, res_prompt_no_ll.output
+
+    res_bad = runner.invoke(app, ["auth", "instagram", "--token", "", "--json"])
+    assert res_bad.exit_code == 1

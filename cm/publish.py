@@ -41,21 +41,71 @@ YOUTUBE_OAUTH_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 )
+META_GRAPH_API_VERSION = "v21.0"
+META_GRAPH_API_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 _USER_AGENT = "content-machine/3.0 (publish-cli)"
 
 
 def redact_secrets(text: str) -> str:
     """Redact API keys, OAuth tokens, and client secrets from diagnostic text."""
     redacted = re.sub(
-        r"([?&]?(?:key|access_token|client_secret|refresh_token)=)[^&\s\"']+",
+        r"([?&]?(?:key|access_token|client_secret|refresh_token|fb_exchange_token)=)[^&\s\"']+",
         r"\1***",
         text,
     )
+    redacted = re.sub(
+        r"(Authorization:\s*(?:OAuth|Bearer)\s+)\S+",
+        r"\1***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
     return re.sub(
-        r'("(?:access_token|refresh_token|client_secret)"\s*:\s*")[^"]*"',
+        r'("(?:access_token|refresh_token|client_secret|fb_exchange_token)"\s*:\s*")[^"]*"',
         r'\1***"',
         redacted,
     )
+
+
+def _get_instagram_env() -> tuple[str, str]:
+    """Read Instagram access token and business/creator account ID from environment."""
+    token = (
+        os.environ.get("IG_ACCESS_TOKEN", "").strip()
+        or os.environ.get("INSTAGRAM_ACCESS_TOKEN", "").strip()
+    )
+    ig_user_id = (
+        os.environ.get("IG_USER_ID", "").strip()
+        or os.environ.get("INSTAGRAM_BUSINESS_ACCOUNT_ID", "").strip()
+    )
+    return token, ig_user_id
+
+
+def update_env_file(updates: dict[str, str], root: Path | None = None) -> Path:
+    """Atomically update or append key=value entries in .env while preserving comments."""
+    env_path = (root or get_repo_root()) / ".env"
+    lines = (
+        env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if env_path.is_file()
+        else []
+    )
+
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                new_lines.append(f"{key}={updates[key]}\n")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line if line.endswith(("\n", "\r")) else f"{line}\n")
+
+    for key, val in updates.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={val}\n")
+
+    atomic_write_text(env_path, "".join(new_lines))
+    return env_path.resolve()
 
 
 def http_request(
@@ -450,24 +500,286 @@ def _s3_sigv4_put(
     )
 
 
+def exchange_instagram_long_lived_token(
+    short_token: str, app_id: str, app_secret: str
+) -> str:
+    """Exchange a short-lived Meta user token for a 60-day long-lived token."""
+    url = (
+        f"{META_GRAPH_API_BASE}/oauth/access_token?"
+        + urllib.parse.urlencode(
+            {
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id.strip(),
+                "client_secret": app_secret.strip(),
+                "fb_exchange_token": short_token.strip(),
+            }
+        )
+    )
+    payload = http_json(url)
+    if not isinstance(payload, dict) or not str(payload.get("access_token", "")).strip():
+        raise RuntimeError("Meta token exchange response missing 'access_token'")
+    return str(payload["access_token"]).strip()
+
+
+def discover_instagram_accounts(
+    access_token: str,
+) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    """Fetch Facebook Pages and linked Instagram Business/Creator accounts."""
+    url = (
+        f"{META_GRAPH_API_BASE}/me/accounts?"
+        + urllib.parse.urlencode(
+            {
+                "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+                "access_token": access_token,
+            }
+        )
+    )
+    payload = http_json(url)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Meta /me/accounts returned non-object JSON")
+    pages_raw = payload.get("data", [])
+    if not isinstance(pages_raw, list):
+        pages_raw = []
+
+    pages_summary: list[dict[str, object]] = []
+    ig_accounts: list[dict[str, str]] = []
+    for page in pages_raw:
+        if not isinstance(page, dict):
+            continue
+        page_id = str(page.get("id", "")).strip()
+        page_name = str(page.get("name", "")).strip()
+        ig_block = page.get("instagram_business_account")
+        ig_id = str(ig_block.get("id", "")).strip() if isinstance(ig_block, dict) else ""
+        has_ig = bool(ig_id)
+        pages_summary.append({"id": page_id, "name": page_name, "has_instagram": has_ig})
+        if has_ig and isinstance(ig_block, dict):
+            ig_accounts.append(
+                {
+                    "page_id": page_id,
+                    "page_name": page_name,
+                    "ig_id": ig_id,
+                    "username": str(ig_block.get("username", "")).strip(),
+                    "name": str(ig_block.get("name", "")).strip(),
+                    "token": str(page.get("access_token") or access_token).strip(),
+                }
+            )
+    return pages_summary, ig_accounts
+
+
+def get_instagram_profile(ig_user_id: str, access_token: str) -> dict[str, object]:
+    """Fetch verified Instagram Professional profile metadata."""
+    url = (
+        f"{META_GRAPH_API_BASE}/{urllib.parse.quote(ig_user_id.strip())}?"
+        + urllib.parse.urlencode(
+            {
+                "fields": "id,username,name,followers_count",
+                "access_token": access_token,
+            }
+        )
+    )
+    payload = http_json(url)
+    if not isinstance(payload, dict) or not str(payload.get("id", "")).strip():
+        raise RuntimeError("Instagram profile response missing 'id'")
+    try:
+        followers_count = max(0, int(payload.get("followers_count", 0)))
+    except (TypeError, ValueError):
+        followers_count = 0
+    return {
+        "id": str(payload["id"]).strip(),
+        "username": str(payload.get("username", "")).strip(),
+        "name": str(payload.get("name", "")).strip(),
+        "followers_count": followers_count,
+    }
+
+
+def check_instagram_connection(root: Path | None = None) -> dict[str, object]:
+    """Inspect .env Instagram credentials and live Meta Graph API link status (no secrets returned)."""
+    load_env(root)
+    token, ig_user_id = _get_instagram_env()
+    if not token:
+        return {
+            "connected": False,
+            "token_valid": False,
+            "has_token": False,
+            "has_ig_user_id": bool(ig_user_id),
+            "configured_ig_user_id": ig_user_id or None,
+            "fb_user_name": None,
+            "pages": [],
+            "accounts": [],
+            "profile": None,
+            "error": "IG_ACCESS_TOKEN is not set in .env",
+        }
+
+    me_url = f"{META_GRAPH_API_BASE}/me?" + urllib.parse.urlencode(
+        {"fields": "id,name", "access_token": token}
+    )
+    try:
+        me_obj = http_json(me_url)
+    except RuntimeError as exc:
+        return {
+            "connected": False,
+            "token_valid": False,
+            "has_token": True,
+            "has_ig_user_id": bool(ig_user_id),
+            "configured_ig_user_id": ig_user_id or None,
+            "fb_user_name": None,
+            "pages": [],
+            "accounts": [],
+            "profile": None,
+            "error": redact_secrets(str(exc)),
+        }
+
+    fb_user_name = str(me_obj.get("name", "")).strip() or None if isinstance(me_obj, dict) else None
+    pages: list[dict[str, object]] = []
+    raw_accounts: list[dict[str, str]] = []
+    accounts_error: str | None = None
+    try:
+        pages, raw_accounts = discover_instagram_accounts(token)
+    except RuntimeError as exc:
+        accounts_error = redact_secrets(str(exc))
+
+    safe_accounts = [
+        {k: v for k, v in acc.items() if k != "token"}
+        for acc in raw_accounts
+    ]
+    target_ig_id = ig_user_id or (raw_accounts[0]["ig_id"] if len(raw_accounts) == 1 else "")
+    profile: dict[str, object] | None = None
+    profile_error: str | None = None
+    if target_ig_id:
+        lookup_token = next(
+            (acc["token"] for acc in raw_accounts if acc["ig_id"] == target_ig_id),
+            token,
+        )
+        try:
+            profile = get_instagram_profile(target_ig_id, lookup_token)
+        except RuntimeError as exc:
+            profile_error = redact_secrets(str(exc))
+
+    connected = bool(profile is not None and bool(ig_user_id))
+    error: str | None = None
+    if not connected:
+        if profile_error:
+            error = profile_error
+        elif accounts_error and not target_ig_id:
+            error = accounts_error
+        elif not raw_accounts and not target_ig_id:
+            if pages:
+                error = (
+                    "No Instagram Professional account is linked to your Facebook Page(s) yet. "
+                    "Link Instagram to your Page, regenerate your token, and run: cm auth instagram"
+                )
+            else:
+                error = (
+                    "No Facebook Pages found for this token. Link a Facebook Page to your Instagram "
+                    "Professional account, regenerate your token, and run: cm auth instagram"
+                )
+        elif profile is not None and not ig_user_id:
+            uname = profile.get("username") or target_ig_id
+            error = f"Found Instagram @{uname}, but IG_USER_ID is not set in .env (run: cm auth instagram)"
+        elif len(raw_accounts) > 1 and not ig_user_id:
+            error = "Multiple Instagram accounts found, and IG_USER_ID is not set in .env (run: cm auth instagram)"
+
+    return {
+        "connected": connected,
+        "token_valid": True,
+        "has_token": True,
+        "has_ig_user_id": bool(ig_user_id),
+        "configured_ig_user_id": ig_user_id or None,
+        "fb_user_name": fb_user_name,
+        "pages": pages,
+        "accounts": safe_accounts,
+        "profile": profile,
+        "error": error,
+    }
+
+
+def authenticate_instagram(
+    token: str,
+    app_id: str | None = None,
+    app_secret: str | None = None,
+    ig_user_id: str | None = None,
+    account_index: int = 0,
+    root: Path | None = None,
+) -> dict[str, object]:
+    """Exchange/discover Instagram credentials via Meta Graph API and save them to .env."""
+    working_token = token.strip()
+    if not working_token:
+        raise ValueError("Meta access token cannot be blank")
+
+    clean_app_id = (app_id or "").strip()
+    clean_app_secret = (app_secret or "").strip()
+    if bool(clean_app_id) != bool(clean_app_secret):
+        raise ValueError("Both --app-id and --app-secret are required for long-lived token exchange")
+
+    exchanged_long_lived = False
+    if clean_app_id and clean_app_secret:
+        working_token = exchange_instagram_long_lived_token(
+            working_token, clean_app_id, clean_app_secret
+        )
+        exchanged_long_lived = True
+
+    pages, ig_accounts = discover_instagram_accounts(working_token)
+    manual_id = (ig_user_id or "").strip()
+    if manual_id:
+        matched = next((acc for acc in ig_accounts if acc["ig_id"] == manual_id), None)
+        selected_ig_id = manual_id
+        selected_token = matched["token"] if matched else working_token
+    elif ig_accounts:
+        if account_index < 0 or account_index >= len(ig_accounts):
+            raise ValueError(
+                f"Invalid --account-index {account_index} (found {len(ig_accounts)} linked Instagram account(s))"
+            )
+        chosen = ig_accounts[account_index]
+        selected_ig_id = chosen["ig_id"]
+        selected_token = chosen["token"]
+    else:
+        raise ValueError(
+            f"Found {len(pages)} Facebook Page(s) but no linked Instagram Professional account. "
+            "Switch Instagram to Professional, link it to your Facebook Page, approve both in "
+            "Graph API Explorer, or pass --ig-user-id."
+        )
+
+    env_path = update_env_file(
+        {"IG_ACCESS_TOKEN": selected_token, "IG_USER_ID": selected_ig_id},
+        root=root,
+    )
+    os.environ["IG_ACCESS_TOKEN"] = selected_token
+    os.environ["IG_USER_ID"] = selected_ig_id
+
+    profile: dict[str, object] | None = None
+    profile_warning: str | None = None
+    try:
+        profile = get_instagram_profile(selected_ig_id, selected_token)
+    except RuntimeError as exc:
+        profile_warning = redact_secrets(str(exc))
+
+    return {
+        "env_path": str(env_path),
+        "ig_user_id": selected_ig_id,
+        "exchanged_long_lived": exchanged_long_lived,
+        "pages_found": len(pages),
+        "accounts_found": len(ig_accounts),
+        "profile": profile,
+        "profile_warning": profile_warning,
+    }
+
+
 def stage_mp4_for_instagram(
     slug: str,
     video_path: Path,
     video_url_override: str | None = None,
     root: Path | None = None,
-) -> str:
-    """Resolve or upload a public HTTPS MP4 URL for Instagram Reels Graph API ingestion."""
+) -> str | None:
+    """Resolve optional public HTTPS MP4 URL, or return None for direct binary rupload."""
     _ = root
     if video_url_override and video_url_override.strip():
         return video_url_override.strip()
 
-    provider = os.environ.get("IG_STAGING_PROVIDER", "none").strip().lower()
+    provider = os.environ.get("IG_STAGING_PROVIDER", "direct").strip().lower()
     base_url = os.environ.get("IG_STAGING_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
-    if provider == "none":
-        raise ValueError(
-            "Instagram Graph API requires a public MP4 URL (pass --video-url or set IG_STAGING_PROVIDER in .env)"
-        )
+    if provider in {"", "direct", "none"}:
+        return None
     if provider == "public_url":
         if not base_url:
             raise ValueError("IG_STAGING_PUBLIC_BASE_URL must be set when IG_STAGING_PROVIDER=public_url")
@@ -495,7 +807,9 @@ def stage_mp4_for_instagram(
         )
         return f"{base_url}/{object_key}"
 
-    raise ValueError(f"Unsupported IG_STAGING_PROVIDER '{provider}' (use none, public_url, r2, or s3)")
+    raise ValueError(
+        f"Unsupported IG_STAGING_PROVIDER '{provider}' (use direct, none, public_url, r2, or s3)"
+    )
 
 
 def upload_youtube_video(
@@ -570,37 +884,68 @@ def upload_youtube_video(
 
 
 def upload_instagram_reel(
-    video_url: str,
+    video_url: str | None,
     caption: str,
     ig_user_id: str,
     access_token: str,
+    *,
+    video_path: Path | None = None,
     poll_interval_sec: float = 3.0,
     max_polls: int = 30,
 ) -> PlatformPublishResult:
-    """Create, poll, and publish an Instagram Reel via Meta Graph API v21.0."""
-    create_form = urllib.parse.urlencode(
-        {
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption,
-            "share_to_feed": "true",
-            "access_token": access_token,
-        }
-    ).encode("utf-8")
+    """Create, optionally rupload a local MP4, poll, and publish an Instagram Reel via Graph API."""
+    clean_video_url = video_url.strip() if video_url and video_url.strip() else None
+    if clean_video_url is None and video_path is None:
+        raise ValueError("Instagram upload requires either video_path or video_url")
+
+    create_params: dict[str, str] = {
+        "media_type": "REELS",
+        "caption": caption,
+        "share_to_feed": "true",
+        "access_token": access_token,
+    }
+    mp4_bytes: bytes | None = None
+    if clean_video_url is not None:
+        create_params["video_url"] = clean_video_url
+    else:
+        assert video_path is not None
+        mp4_bytes = video_path.read_bytes()
+        if not mp4_bytes:
+            raise ValueError(f"Instagram video file is empty: {video_path}")
+        create_params["upload_type"] = "resumable"
+
     created = http_json(
-        f"https://graph.facebook.com/v21.0/{urllib.parse.quote(ig_user_id)}/media",
+        f"{META_GRAPH_API_BASE}/{urllib.parse.quote(ig_user_id)}/media",
         method="POST",
-        data=create_form,
+        data=urllib.parse.urlencode(create_params).encode("utf-8"),
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     if not isinstance(created, dict) or not created.get("id"):
         raise RuntimeError("Instagram container creation response missing 'id'")
     creation_id = str(created["id"])
 
+    if mp4_bytes is not None:
+        upload_uri = str(
+            created.get("uri")
+            or f"https://rupload.facebook.com/ig-api-upload/{META_GRAPH_API_VERSION}/{urllib.parse.quote(creation_id)}"
+        )
+        http_request(
+            upload_uri,
+            method="POST",
+            data=mp4_bytes,
+            headers={
+                "Authorization": f"OAuth {access_token}",
+                "offset": "0",
+                "file_size": str(len(mp4_bytes)),
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=300.0,
+        )
+
     finished = False
     for _ in range(max_polls):
         status_url = (
-            f"https://graph.facebook.com/v21.0/{urllib.parse.quote(creation_id)}?"
+            f"{META_GRAPH_API_BASE}/{urllib.parse.quote(creation_id)}?"
             + urllib.parse.urlencode({"fields": "status_code,status", "access_token": access_token})
         )
         status_obj = http_json(status_url)
@@ -623,7 +968,7 @@ def upload_instagram_reel(
         {"creation_id": creation_id, "access_token": access_token}
     ).encode("utf-8")
     published = http_json(
-        f"https://graph.facebook.com/v21.0/{urllib.parse.quote(ig_user_id)}/media_publish",
+        f"{META_GRAPH_API_BASE}/{urllib.parse.quote(ig_user_id)}/media_publish",
         method="POST",
         data=publish_form,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -635,7 +980,7 @@ def upload_instagram_reel(
     permalink: str | None = None
     try:
         meta = http_json(
-            f"https://graph.facebook.com/v21.0/{urllib.parse.quote(media_id)}?"
+            f"{META_GRAPH_API_BASE}/{urllib.parse.quote(media_id)}?"
             + urllib.parse.urlencode({"fields": "permalink", "access_token": access_token})
         )
         if isinstance(meta, dict) and meta.get("permalink"):
@@ -648,7 +993,7 @@ def upload_instagram_reel(
         status="published",
         video_id=media_id,
         url=permalink,
-        staged_url=video_url,
+        staged_url=clean_video_url,
     )
 
 
@@ -745,11 +1090,11 @@ def publish_run(
                     access_token=token,
                 )
             else:
-                ig_user_id = os.environ.get("IG_USER_ID", "").strip()
-                ig_token = os.environ.get("IG_ACCESS_TOKEN", "").strip()
+                ig_token, ig_user_id = _get_instagram_env()
                 if not ig_user_id or not ig_token:
                     raise ValueError(
-                        "Instagram publishing requires IG_USER_ID and IG_ACCESS_TOKEN in .env"
+                        "Instagram publishing requires IG_USER_ID and IG_ACCESS_TOKEN in .env "
+                        "(run: cm auth instagram)"
                     )
                 staged_url = stage_mp4_for_instagram(
                     slug=slug,
@@ -762,6 +1107,7 @@ def publish_run(
                     caption=final_desc,
                     ig_user_id=ig_user_id,
                     access_token=ig_token,
+                    video_path=None if staged_url else mp4_path,
                 )
             results.append(res)
             meta: dict[str, str] = {"video_id": res.video_id or "", "status": res.status}

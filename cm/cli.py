@@ -41,7 +41,12 @@ from cm.models import (
     YouTubePrivacy,
 )
 from cm.paths import resolve_engine_dir, run_dir
-from cm.publish import authenticate_youtube, publish_run
+from cm.publish import (
+    authenticate_instagram,
+    authenticate_youtube,
+    check_instagram_connection,
+    publish_run,
+)
 from cm.renderer import FrameFormat, RenderQuality, render_video
 from cm.research import (
     YouTubeOrder,
@@ -1076,6 +1081,142 @@ def auth_youtube_cmd(
     )
 
 
+@auth_app.command("instagram")
+def auth_instagram_cmd(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Check current .env Instagram token and linked account status without modifying .env",
+    ),
+    token: str | None = typer.Option(
+        None, "--token", help="Meta User Access Token (prompts securely if omitted)"
+    ),
+    app_id: str | None = typer.Option(
+        None, "--app-id", help="Optional Meta App ID for 60-day long-lived token exchange"
+    ),
+    app_secret: str | None = typer.Option(
+        None,
+        "--app-secret",
+        help="Optional Meta App Secret for 60-day long-lived token exchange",
+    ),
+    ig_user_id: str | None = typer.Option(
+        None, "--ig-user-id", help="Optional manual Instagram Business/Creator Account ID"
+    ),
+    account_index: int = typer.Option(
+        0, "--account-index", min=0, help="0-based index if multiple Instagram accounts are linked"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Connect Instagram Professional account via Meta Graph API, or --check live status."""
+    if check:
+        status = check_instagram_connection()
+        if as_json:
+            typer.echo(json.dumps(status, indent=2))
+            return
+
+        badge = "[green][OK][/green]" if status["connected"] else "[yellow][WARN][/yellow]"
+        token_state = (
+            "valid"
+            if status["token_valid"]
+            else ("invalid/expired" if status["has_token"] else "not set")
+        )
+        console.print(
+            f"{badge} Instagram connection: "
+            f"{'CONNECTED' if status['connected'] else 'NOT CONNECTED'} "
+            f"(token: {token_state}, IG_USER_ID: {status['configured_ig_user_id'] or 'not set'})"
+        )
+        if status.get("fb_user_name"):
+            console.print(f"Facebook entity: {_ascii_safe(str(status['fb_user_name']))}")
+        pages = status.get("pages")
+        if isinstance(pages, list) and pages:
+            page_table = Table(title=f"Facebook Pages ({len(pages)})", box=box.ASCII)
+            page_table.add_column("Page ID")
+            page_table.add_column("Name")
+            page_table.add_column("Linked IG")
+            for pg in pages:
+                page_table.add_row(
+                    str(pg.get("id", "-")),
+                    _ascii_safe(str(pg.get("name", "-"))),
+                    "yes" if pg.get("has_instagram") else "no",
+                )
+            console.print(page_table)
+        accounts = status.get("accounts")
+        if isinstance(accounts, list) and accounts:
+            acc_table = Table(title=f"Linked Instagram Accounts ({len(accounts)})", box=box.ASCII)
+            acc_table.add_column("IG User ID")
+            acc_table.add_column("Username")
+            acc_table.add_column("Page")
+            for acc in accounts:
+                acc_table.add_row(
+                    str(acc.get("ig_id", "-")),
+                    "@" + _ascii_safe(str(acc.get("username") or "-")),
+                    _ascii_safe(str(acc.get("page_name") or "-")),
+                )
+            console.print(acc_table)
+        prof = status.get("profile")
+        if isinstance(prof, dict):
+            console.print(
+                f"Profile: @{_ascii_safe(str(prof.get('username') or prof.get('id')))} "
+                f"({_ascii_safe(str(prof.get('name') or '-'))}, "
+                f"{int(prof.get('followers_count', 0)):,} followers)"
+            )
+        if status.get("error"):
+            console.print(f"[yellow]Next step:[/yellow] {_ascii_safe(str(status['error']))}")
+        return
+
+    interactive_token = token is None
+    resolved_token = (
+        token.strip()
+        if token is not None
+        else typer.prompt("Meta User Access Token", hide_input=True).strip()
+    )
+    resolved_app_id = app_id
+    resolved_app_secret = app_secret
+    if (
+        resolved_app_id is None
+        and resolved_app_secret is None
+        and interactive_token
+        and typer.confirm(
+            "Exchange for a 60-day long-lived token using Meta App ID + Secret?",
+            default=False,
+        )
+    ):
+        resolved_app_id = typer.prompt("Meta App ID").strip()
+        resolved_app_secret = typer.prompt("Meta App Secret", hide_input=True).strip()
+
+    try:
+        summary = authenticate_instagram(
+            token=resolved_token,
+            app_id=resolved_app_id,
+            app_secret=resolved_app_secret,
+            ig_user_id=ig_user_id,
+            account_index=account_index,
+        )
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(json.dumps(summary, indent=2))
+        return
+
+    ll_tag = "60-day long-lived" if summary["exchanged_long_lived"] else "page/user token"
+    console.print(
+        f"[green][OK][/green] Saved IG_ACCESS_TOKEN ({ll_tag}) and "
+        f"IG_USER_ID={summary['ig_user_id']} to {summary['env_path']}"
+    )
+    profile = summary.get("profile")
+    if isinstance(profile, dict):
+        uname = _ascii_safe(str(profile.get("username") or summary["ig_user_id"]))
+        name = _ascii_safe(str(profile.get("name") or "-"))
+        followers = int(profile.get("followers_count", 0))
+        console.print(f"Verified Instagram profile: @{uname} ({name}, {followers:,} followers)")
+    elif summary.get("profile_warning"):
+        console.print(
+            f"[yellow][WARN][/yellow] Saved credentials, but profile check returned: "
+            f"{_ascii_safe(str(summary['profile_warning']))}"
+        )
+
+
 @app.command()
 def publish(
     slug: str = typer.Argument(..., help="Run slug to publish"),
@@ -1131,7 +1272,14 @@ def publish(
     table.add_column("Video ID")
     table.add_column("Details")
     for res in receipt.results:
-        detail = res.url or res.error or (f"privacy={res.privacy}" if res.privacy else res.staged_url or "-")
+        if res.platform == "instagram" and res.status == "dry_run" and not res.staged_url:
+            detail = "direct upload (rupload.facebook.com)"
+        else:
+            detail = (
+                res.url
+                or res.error
+                or (f"privacy={res.privacy}" if res.privacy else res.staged_url or "-")
+            )
         table.add_row(res.platform, res.status, res.video_id or "-", _ascii_safe(detail))
     console.print(table)
     console.print(f"Tags: {', '.join('#' + t for t in receipt.tags)}")

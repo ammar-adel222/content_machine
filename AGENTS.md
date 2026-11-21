@@ -45,7 +45,8 @@ Invoke CLI commands via `.venv\Scripts\cm.exe` (Windows) or `.venv/bin/cm` (Linu
    - `cm render <slug> --quality preview` *(30fps quick check)* -> `cm render <slug> --quality final` *(60fps H.264 `yuv420p` + AAC `192k`)*
 5. **Publishing & Analytics:**
    - `cm auth youtube` *(browser OAuth 2.0 PKCE flow -> `secrets/youtube_token.json`)*
-   - `cm publish <slug> --dry-run` -> `cm publish <slug> --platform youtube --privacy private` *(supports `--platform instagram` via `IG_STAGING_PROVIDER` or `--video-url`)*
+   - `cm auth instagram` *(interactive Meta Graph API wizard -> `.env`, or `cm auth instagram --check` to verify link)*
+   - `cm publish <slug> --dry-run` -> `cm publish <slug> --platform youtube --privacy private` *(also `--platform instagram`, which uploads local MP4s directly via `rupload.facebook.com` by default; `--video-url` or R2/S3 optional)*
    - `cm analytics sync` *(pulls live views/likes/comments into `channels/catalog.json`)*
 6. **Status & Schemas:**
    - `cm status` / `cm status <slug>`
