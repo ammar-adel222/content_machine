@@ -31,21 +31,21 @@ Confirm before publishing:
 ## Step 3: Publish & Close Feedback Loop
 
 - Exported deliverable sits at `runs/<slug>/final.mp4` with verified manifest `runs/<slug>/render_report.json`.
-1. Link YouTube OAuth and/or Instagram Professional account once:
+1. Link YouTube OAuth and/or Meta (Instagram + Facebook Page) once:
    ```powershell
    cm auth youtube
-   cm auth instagram          # saves IG_ACCESS_TOKEN & IG_USER_ID to .env
+   cm auth instagram          # saves IG_ACCESS_TOKEN, IG_USER_ID & FB_PAGE_ID to .env
    cm auth instagram --check  # verifies Meta Page <-> Instagram link without modifying .env
    ```
 2. Verify metadata, hashtags, and MP4 stream readiness in dry-run mode (never modifies `catalog.json` or uploads):
    ```powershell
    cm publish <slug> --dry-run
    ```
-3. Publish to YouTube Shorts and/or Instagram Reels (receipt saved to `runs/<slug>/publish_receipt.json` and `channels/catalog.json`):
+3. Publish to YouTube Shorts, Instagram Reels, and/or Facebook Reels (receipt saved to `runs/<slug>/publish_receipt.json` and `channels/catalog.json`):
    ```powershell
    cm publish <slug> --platform youtube --privacy private
-   # Optional Instagram Reels (direct binary upload via rupload.facebook.com by default; --video-url / R2 / S3 optional):
-   cm publish <slug> --platform youtube --platform instagram
+   # Direct local Reels upload via rupload.facebook.com by default (--video-url / R2 / S3 optional):
+   cm publish <slug> -p youtube -p instagram -p facebook
    ```
 4. After 24–72h live views accumulate, sync views, likes, and comments back into `channels/catalog.json` (`cm schema analytics`) and feed winning patterns back into `ideate`:
    ```powershell

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from cm.catalog import load_catalog, save_catalog
 from cm.models import AnalyticsSyncReport, PlatformMetrics, PublishedEntry
-from cm.publish import get_youtube_access_token, http_json
+from cm.publish import META_GRAPH_API_BASE, _get_facebook_env, get_youtube_access_token, http_json
 from cm.tts import load_env
 
 
@@ -20,6 +20,12 @@ def _to_int(raw: object) -> int:
         return 0
 
 
+def _summary_total(payload: dict[str, object], key: str) -> int:
+    block = payload.get(key)
+    summary = block.get("summary") if isinstance(block, dict) else None
+    return _to_int(summary.get("total_count")) if isinstance(summary, dict) else 0
+
+
 def sync_channel_analytics(root: Path | None = None) -> AnalyticsSyncReport:
     """Pull live views, likes, and comments for published Shorts/Reels into catalog.json."""
     load_env(root)
@@ -28,6 +34,7 @@ def sync_channel_analytics(root: Path | None = None) -> AnalyticsSyncReport:
 
     yt_map: dict[str, PublishedEntry] = {}
     ig_items: list[tuple[PublishedEntry, str]] = []
+    fb_items: list[tuple[PublishedEntry, str]] = []
 
     for entry in catalog.published:
         yt_meta = entry.platforms.get("youtube")
@@ -36,10 +43,14 @@ def sync_channel_analytics(root: Path | None = None) -> AnalyticsSyncReport:
         ig_meta = entry.platforms.get("instagram")
         if ig_meta and ig_meta.get("video_id"):
             ig_items.append((entry, str(ig_meta["video_id"])))
+        fb_meta = entry.platforms.get("facebook")
+        if fb_meta and fb_meta.get("video_id"):
+            fb_items.append((entry, str(fb_meta["video_id"])))
 
     warnings: list[str] = []
     youtube_updated = 0
     instagram_updated = 0
+    facebook_updated = 0
 
     if yt_map:
         api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
@@ -111,7 +122,36 @@ def sync_channel_analytics(root: Path | None = None) -> AnalyticsSyncReport:
                     )
                     instagram_updated += 1
 
-    if youtube_updated > 0 or instagram_updated > 0:
+    if fb_items:
+        fb_token, _ = _get_facebook_env()
+        if not fb_token:
+            warnings.append("Facebook analytics skipped: FB_PAGE_ACCESS_TOKEN/IG_ACCESS_TOKEN is not set.")
+        else:
+            for entry, video_id in fb_items:
+                url = (
+                    f"{META_GRAPH_API_BASE}/{urllib.parse.quote(video_id)}?"
+                    + urllib.parse.urlencode(
+                        {
+                            "fields": "views,likes.summary(true),comments.summary(true)",
+                            "access_token": fb_token,
+                        }
+                    )
+                )
+                try:
+                    payload = http_json(url)
+                except RuntimeError as exc:
+                    warnings.append(f"Facebook analytics failed for {video_id}: {exc}")
+                    continue
+                if isinstance(payload, dict):
+                    entry.analytics["facebook"] = PlatformMetrics(
+                        views=_to_int(payload.get("views")),
+                        likes=_summary_total(payload, "likes"),
+                        comments=_summary_total(payload, "comments"),
+                        synced_at=now,
+                    )
+                    facebook_updated += 1
+
+    if youtube_updated > 0 or instagram_updated > 0 or facebook_updated > 0:
         save_catalog(catalog, root=root)
 
     return AnalyticsSyncReport(
@@ -119,5 +159,6 @@ def sync_channel_analytics(root: Path | None = None) -> AnalyticsSyncReport:
         videos_checked=len(catalog.published),
         youtube_updated=youtube_updated,
         instagram_updated=instagram_updated,
+        facebook_updated=facebook_updated,
         warnings=warnings,
     )

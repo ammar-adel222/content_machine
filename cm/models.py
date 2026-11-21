@@ -655,6 +655,7 @@ class PublishPlatform(StrEnum):
 
     YOUTUBE = "youtube"
     INSTAGRAM = "instagram"
+    FACEBOOK = "facebook"
 
 
 class YouTubePrivacy(StrEnum):
@@ -668,7 +669,7 @@ class YouTubePrivacy(StrEnum):
 class PlatformPublishResult(BaseModel):
     """Outcome for a single platform during cm publish."""
 
-    platform: Literal["youtube", "instagram"]
+    platform: Literal["youtube", "instagram", "facebook"]
     status: Literal["dry_run", "published", "skipped", "failed"]
     video_id: str | None = None
     url: str | None = None
@@ -699,4 +700,5 @@ class AnalyticsSyncReport(BaseModel):
     videos_checked: int = 0
     youtube_updated: int = 0
     instagram_updated: int = 0
+    facebook_updated: int = 0
     warnings: list[str] = Field(default_factory=list)

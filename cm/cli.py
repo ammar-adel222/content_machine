@@ -1128,7 +1128,8 @@ def auth_instagram_cmd(
         console.print(
             f"{badge} Instagram connection: "
             f"{'CONNECTED' if status['connected'] else 'NOT CONNECTED'} "
-            f"(token: {token_state}, IG_USER_ID: {status['configured_ig_user_id'] or 'not set'})"
+            f"(token: {token_state}, IG_USER_ID: {status['configured_ig_user_id'] or 'not set'}, "
+            f"FB_PAGE_ID: {status.get('fb_page_id') or 'not set'})"
         )
         if status.get("fb_user_name"):
             console.print(f"Facebook entity: {_ascii_safe(str(status['fb_user_name']))}")
@@ -1205,9 +1206,10 @@ def auth_instagram_cmd(
         return
 
     ll_tag = "60-day long-lived" if summary["exchanged_long_lived"] else "page/user token"
+    fb_part = f" and FB_PAGE_ID={summary['fb_page_id']}" if summary.get("fb_page_id") else ""
     console.print(
-        f"[green][OK][/green] Saved IG_ACCESS_TOKEN ({ll_tag}) and "
-        f"IG_USER_ID={summary['ig_user_id']} to {summary['env_path']}"
+        f"[green][OK][/green] Saved IG_ACCESS_TOKEN ({ll_tag}), "
+        f"IG_USER_ID={summary['ig_user_id']}{fb_part} to {summary['env_path']}"
     )
     profile = summary.get("profile")
     if isinstance(profile, dict):
@@ -1226,7 +1228,10 @@ def auth_instagram_cmd(
 def publish(
     slug: str = typer.Argument(..., help="Run slug to publish"),
     platform: list[PublishPlatform] | None = typer.Option(
-        None, "--platform", "-p", help="Target platform (repeatable: youtube, instagram)"
+        None,
+        "--platform",
+        "-p",
+        help="Target platform (repeatable: youtube, instagram, facebook)",
     ),
     privacy: YouTubePrivacy | None = typer.Option(
         None, "--privacy", help="YouTube privacy: private, unlisted, or public"
@@ -1236,7 +1241,7 @@ def publish(
     tag: list[str] | None = typer.Option(None, "--tag", help="Extra tag/hashtag (repeatable)"),
     video: Path | None = typer.Option(None, "--video", help="Override MP4 path (defaults to final.mp4)"),
     video_url: str | None = typer.Option(
-        None, "--video-url", help="Public HTTPS MP4 URL for Instagram Reels"
+        None, "--video-url", help="Public HTTPS MP4 URL for Instagram/Facebook Reels"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate metadata & MP4 without uploading"),
     allow_mock_audio: bool = typer.Option(
@@ -1244,7 +1249,7 @@ def publish(
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON PublishReceipt"),
 ) -> None:
-    """Publish a rendered Short/Reel to YouTube Shorts and/or Instagram Reels."""
+    """Publish a rendered Short/Reel to YouTube Shorts, Instagram Reels, and/or Facebook Reels."""
     try:
         receipt = publish_run(
             slug=slug,
@@ -1277,7 +1282,7 @@ def publish(
     table.add_column("Video ID")
     table.add_column("Details")
     for res in receipt.results:
-        if res.platform == "instagram" and res.status == "dry_run" and not res.staged_url:
+        if res.platform in {"instagram", "facebook"} and res.status == "dry_run" and not res.staged_url:
             detail = "direct upload (rupload.facebook.com)"
         else:
             detail = (
@@ -1311,7 +1316,8 @@ def analytics_sync_cmd(
         console.print(f"[yellow][WARN][/yellow] {_ascii_safe(warn)}")
     console.print(
         f"[green][OK][/green] Synced analytics across {report.videos_checked} catalog video(s) "
-        f"(YouTube updated: {report.youtube_updated}, Instagram updated: {report.instagram_updated})"
+        f"(YouTube updated: {report.youtube_updated}, Instagram updated: {report.instagram_updated}, "
+        f"Facebook updated: {report.facebook_updated})"
     )
 
 

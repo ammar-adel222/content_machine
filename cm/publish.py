@@ -80,6 +80,20 @@ def _get_instagram_env() -> tuple[str, str]:
     return token, ig_user_id
 
 
+def _get_facebook_env() -> tuple[str, str]:
+    """Read Facebook Page access token and Page ID from environment."""
+    token = (
+        os.environ.get("FB_PAGE_ACCESS_TOKEN", "").strip()
+        or os.environ.get("IG_ACCESS_TOKEN", "").strip()
+        or os.environ.get("INSTAGRAM_ACCESS_TOKEN", "").strip()
+    )
+    fb_page_id = (
+        os.environ.get("FB_PAGE_ID", "").strip()
+        or os.environ.get("FACEBOOK_PAGE_ID", "").strip()
+    )
+    return token, fb_page_id
+
+
 def update_env_file(updates: dict[str, str], root: Path | None = None) -> Path:
     """Atomically update or append key=value entries in .env while preserving comments."""
     env_path = (root or get_repo_root()) / ".env"
@@ -597,9 +611,10 @@ def get_instagram_profile(ig_user_id: str, access_token: str) -> dict[str, objec
 
 
 def check_instagram_connection(root: Path | None = None) -> dict[str, object]:
-    """Inspect .env Instagram credentials and live Meta Graph API link status (no secrets returned)."""
+    """Inspect .env Instagram/Facebook credentials and live Meta Graph API link status (no secrets returned)."""
     load_env(root)
     token, ig_user_id = _get_instagram_env()
+    _, fb_page_id = _get_facebook_env()
     if not token:
         return {
             "connected": False,
@@ -607,6 +622,7 @@ def check_instagram_connection(root: Path | None = None) -> dict[str, object]:
             "has_token": False,
             "has_ig_user_id": bool(ig_user_id),
             "configured_ig_user_id": ig_user_id or None,
+            "fb_page_id": fb_page_id or None,
             "fb_user_name": None,
             "pages": [],
             "accounts": [],
@@ -626,6 +642,7 @@ def check_instagram_connection(root: Path | None = None) -> dict[str, object]:
             "has_token": True,
             "has_ig_user_id": bool(ig_user_id),
             "configured_ig_user_id": ig_user_id or None,
+            "fb_page_id": fb_page_id or None,
             "fb_user_name": None,
             "pages": [],
             "accounts": [],
@@ -689,6 +706,7 @@ def check_instagram_connection(root: Path | None = None) -> dict[str, object]:
         "has_token": True,
         "has_ig_user_id": bool(ig_user_id),
         "configured_ig_user_id": ig_user_id or None,
+        "fb_page_id": fb_page_id or None,
         "fb_user_name": fb_user_name,
         "pages": pages,
         "accounts": safe_accounts,
@@ -705,7 +723,7 @@ def authenticate_instagram(
     account_index: int = 0,
     root: Path | None = None,
 ) -> dict[str, object]:
-    """Exchange/discover Instagram credentials via Meta Graph API and save them to .env."""
+    """Exchange/discover Instagram + Facebook Page credentials via Meta Graph API and save to .env."""
     working_token = token.strip()
     if not working_token:
         raise ValueError("Meta access token cannot be blank")
@@ -724,10 +742,12 @@ def authenticate_instagram(
 
     pages, ig_accounts = discover_instagram_accounts(working_token)
     manual_id = (ig_user_id or "").strip()
+    selected_page_id = ""
     if manual_id:
         matched = next((acc for acc in ig_accounts if acc["ig_id"] == manual_id), None)
         selected_ig_id = manual_id
         selected_token = matched["token"] if matched else working_token
+        selected_page_id = matched["page_id"] if matched else ""
     elif ig_accounts:
         if account_index < 0 or account_index >= len(ig_accounts):
             raise ValueError(
@@ -736,6 +756,7 @@ def authenticate_instagram(
         chosen = ig_accounts[account_index]
         selected_ig_id = chosen["ig_id"]
         selected_token = chosen["token"]
+        selected_page_id = chosen["page_id"]
     else:
         raise ValueError(
             f"Found {len(pages)} Facebook Page(s) but no linked Instagram Professional account. "
@@ -743,10 +764,15 @@ def authenticate_instagram(
             "Graph API Explorer, or pass --ig-user-id."
         )
 
-    env_path = update_env_file(
-        {"IG_ACCESS_TOKEN": selected_token, "IG_USER_ID": selected_ig_id},
-        root=root,
-    )
+    env_updates: dict[str, str] = {
+        "IG_ACCESS_TOKEN": selected_token,
+        "IG_USER_ID": selected_ig_id,
+    }
+    if selected_page_id:
+        env_updates["FB_PAGE_ID"] = selected_page_id
+        os.environ["FB_PAGE_ID"] = selected_page_id
+
+    env_path = update_env_file(env_updates, root=root)
     os.environ["IG_ACCESS_TOKEN"] = selected_token
     os.environ["IG_USER_ID"] = selected_ig_id
 
@@ -760,6 +786,7 @@ def authenticate_instagram(
     return {
         "env_path": str(env_path),
         "ig_user_id": selected_ig_id,
+        "fb_page_id": selected_page_id or None,
         "exchanged_long_lived": exchanged_long_lived,
         "pages_found": len(pages),
         "accounts_found": len(ig_accounts),
@@ -1001,6 +1028,106 @@ def upload_instagram_reel(
     )
 
 
+def upload_facebook_reel(
+    video_path: Path,
+    description: str,
+    fb_page_id: str,
+    access_token: str,
+    *,
+    video_url: str | None = None,
+) -> PlatformPublishResult:
+    """Create, rupload/stage, and publish a Facebook Page Reel via Meta Graph API."""
+    clean_video_url = video_url.strip() if video_url and video_url.strip() else None
+    mp4_bytes = b""
+    if clean_video_url is None:
+        mp4_bytes = video_path.read_bytes()
+        if not mp4_bytes:
+            raise ValueError(f"Facebook video file is empty: {video_path}")
+
+    reels_endpoint = f"{META_GRAPH_API_BASE}/{urllib.parse.quote(fb_page_id)}/video_reels"
+    started = http_json(
+        reels_endpoint,
+        method="POST",
+        data=urllib.parse.urlencode(
+            {"upload_phase": "start", "access_token": access_token}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if not isinstance(started, dict) or not str(started.get("video_id", "")).strip():
+        raise RuntimeError("Facebook Reels upload initialization missing 'video_id'")
+    video_id = str(started["video_id"]).strip()
+    upload_url = str(
+        started.get("upload_url")
+        or f"https://rupload.facebook.com/video-upload/{META_GRAPH_API_VERSION}/{urllib.parse.quote(video_id)}"
+    )
+
+    if clean_video_url is not None:
+        http_request(
+            upload_url,
+            method="POST",
+            data=b"",
+            headers={
+                "Authorization": f"OAuth {access_token}",
+                "file_url": clean_video_url,
+            },
+            timeout=120.0,
+        )
+    else:
+        http_request(
+            upload_url,
+            method="POST",
+            data=mp4_bytes,
+            headers={
+                "Authorization": f"OAuth {access_token}",
+                "offset": "0",
+                "file_size": str(len(mp4_bytes)),
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=300.0,
+        )
+
+    finished = http_json(
+        reels_endpoint,
+        method="POST",
+        data=urllib.parse.urlencode(
+            {
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "video_state": "PUBLISHED",
+                "description": description,
+                "access_token": access_token,
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if not isinstance(finished, dict) or finished.get("success") is False:
+        raise RuntimeError("Facebook Reels finish phase failed")
+
+    reel_url = f"https://www.facebook.com/reel/{video_id}"
+    try:
+        meta = http_json(
+            f"{META_GRAPH_API_BASE}/{urllib.parse.quote(video_id)}?"
+            + urllib.parse.urlencode({"fields": "permalink_url", "access_token": access_token})
+        )
+        if isinstance(meta, dict) and str(meta.get("permalink_url", "")).strip():
+            raw_link = str(meta["permalink_url"]).strip()
+            reel_url = (
+                f"https://www.facebook.com{raw_link}"
+                if raw_link.startswith("/")
+                else raw_link
+            )
+    except RuntimeError:
+        pass
+
+    return PlatformPublishResult(
+        platform="facebook",
+        status="published",
+        video_id=video_id,
+        url=reel_url,
+        staged_url=clean_video_url,
+    )
+
+
 def publish_run(
     slug: str,
     platforms: list[PublishPlatform] | None = None,
@@ -1062,7 +1189,7 @@ def publish_run(
             else:
                 dry_results.append(
                     PlatformPublishResult(
-                        platform="instagram",
+                        platform=plat.value,
                         status="dry_run",
                         staged_url=video_url,
                     )
@@ -1093,7 +1220,7 @@ def publish_run(
                     is_short=(blueprint.format == FormatPreset.SHORT_9X16),
                     access_token=token,
                 )
-            else:
+            elif plat == PublishPlatform.INSTAGRAM:
                 ig_token, ig_user_id = _get_instagram_env()
                 if not ig_user_id or not ig_token:
                     raise ValueError(
@@ -1112,6 +1239,20 @@ def publish_run(
                     ig_user_id=ig_user_id,
                     access_token=ig_token,
                     video_path=None if staged_url else mp4_path,
+                )
+            else:
+                fb_token, fb_page_id = _get_facebook_env()
+                if not fb_page_id or not fb_token:
+                    raise ValueError(
+                        "Facebook publishing requires FB_PAGE_ID and FB_PAGE_ACCESS_TOKEN/IG_ACCESS_TOKEN "
+                        "in .env (run: cm auth instagram)"
+                    )
+                res = upload_facebook_reel(
+                    video_path=mp4_path,
+                    description=final_desc,
+                    fb_page_id=fb_page_id,
+                    access_token=fb_token,
+                    video_url=video_url,
                 )
             results.append(res)
             meta: dict[str, str] = {"video_id": res.video_id or "", "status": res.status}

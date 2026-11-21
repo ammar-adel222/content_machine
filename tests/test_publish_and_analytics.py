@@ -49,6 +49,7 @@ from cm.publish import (
     resolve_youtube_secret_paths,
     stage_mp4_for_instagram,
     update_env_file,
+    upload_facebook_reel,
     upload_instagram_reel,
     upload_youtube_video,
 )
@@ -547,6 +548,9 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
     monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("IG_USER_ID", raising=False)
+    monkeypatch.delenv("FB_PAGE_ID", raising=False)
+    monkeypatch.delenv("FACEBOOK_PAGE_ID", raising=False)
+    monkeypatch.delenv("FB_PAGE_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("INSTAGRAM_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("IG_STAGING_PROVIDER", raising=False)
@@ -579,17 +583,19 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     # Dry-run succeeds even with mock TTS & leaves catalog/state untouched
     dry_receipt = publish_run(
         "pub-short",
-        platforms=[PublishPlatform.YOUTUBE, PublishPlatform.INSTAGRAM],
+        platforms=[PublishPlatform.YOUTUBE, PublishPlatform.INSTAGRAM, PublishPlatform.FACEBOOK],
         video_url="https://cdn.example/dry.mp4",
         dry_run=True,
     )
     assert dry_receipt.dry_run is True
-    assert len(dry_receipt.results) == 2
+    assert len(dry_receipt.results) == 3
     assert load_catalog().published == []
     assert load_state("pub-short").stages[PipelineStage.PUBLISH].status == StageStatus.PENDING
 
-    # Live CLI dry-run + schema commands (direct Instagram dry-run notice & cp1252 check)
-    res_dry_cli = runner.invoke(app, ["publish", "pub-short", "-p", "youtube", "-p", "instagram", "--dry-run"])
+    # Live CLI dry-run + schema commands (direct Instagram/Facebook dry-run notice & cp1252 check)
+    res_dry_cli = runner.invoke(
+        app, ["publish", "pub-short", "-p", "youtube", "-p", "instagram", "-p", "facebook", "--dry-run"]
+    )
     assert res_dry_cli.exit_code == 0, res_dry_cli.output
     res_dry_cli.output.encode("cp1252")
     assert "Publish (DRY-RUN)" in res_dry_cli.output
@@ -721,24 +727,62 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     assert len(load_catalog().published) == 1
     assert "hashing" in load_catalog().published[0].keywords
 
-    # All-failed live publish returns exit code 1
+    # All-failed live publish returns exit code 1 (missing IG and FB creds)
     monkeypatch.delenv("IG_USER_ID", raising=False)
     monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("FB_PAGE_ID", raising=False)
+    monkeypatch.delenv("FB_PAGE_ACCESS_TOKEN", raising=False)
     res_all_fail = runner.invoke(
         app, ["publish", "pub-short", "-p", "instagram", "--allow-mock-audio", "--json"]
     )
     assert res_all_fail.exit_code == 1
     assert load_state("pub-short").stages[PipelineStage.PUBLISH].status == StageStatus.FAILED
 
-    # Analytics sync: first test missing YT/IG credentials produce warnings without crashing
+    res_fb_missing = runner.invoke(
+        app, ["publish", "pub-short", "-p", "facebook", "--allow-mock-audio", "--json"]
+    )
+    assert res_fb_missing.exit_code == 1
+    assert "FB_PAGE_ID" in res_fb_missing.output
+
+    # Facebook live publish via CLI records platform in catalog
+    monkeypatch.setenv("FB_PAGE_ID", "fb-p1")
+    monkeypatch.setenv("FB_PAGE_ACCESS_TOKEN", "fb-page-tok")
+    monkeypatch.setattr(
+        "cm.publish.upload_facebook_reel",
+        lambda **_kw: PublishReceipt.model_validate(
+            {
+                "slug": "pub-short",
+                "title": "t",
+                "description": "d",
+                "video_path": "p",
+                "results": [
+                    {
+                        "platform": "facebook",
+                        "status": "published",
+                        "video_id": "FB_REEL_1",
+                        "url": "https://www.facebook.com/reel/FB_REEL_1",
+                    }
+                ],
+            }
+        ).results[0],
+    )
+    res_fb_cli = runner.invoke(
+        app, ["publish", "pub-short", "-p", "facebook", "--allow-mock-audio"]
+    )
+    assert res_fb_cli.exit_code == 0, res_fb_cli.output
+    res_fb_cli.output.encode("cp1252")
+    assert load_catalog().published[0].platforms["facebook"]["video_id"] == "FB_REEL_1"
+
+    # Analytics sync: first test missing YT/IG/FB credentials produce warnings without crashing
+    monkeypatch.delenv("FB_PAGE_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(
         "cm.analytics.get_youtube_access_token",
         lambda root=None: (_ for _ in ()).throw(FileNotFoundError("no token")),
     )
     rep_warn = sync_channel_analytics()
-    assert len(rep_warn.warnings) == 2
+    assert len(rep_warn.warnings) == 3
 
-    # Analytics sync with YOUTUBE_API_KEY + IG_ACCESS_TOKEN + malformed items/stats
+    # Analytics sync with YOUTUBE_API_KEY + IG_ACCESS_TOKEN + Facebook metrics + malformed items/stats
     monkeypatch.setenv("YOUTUBE_API_KEY", "yt-key-1")
     monkeypatch.setenv("IG_ACCESS_TOKEN", "ig-tok-1")
 
@@ -755,6 +799,12 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
                     },
                 ]
             }
+        if "graph.facebook.com" in url and "likes.summary" in url:
+            return {
+                "views": 2400,
+                "likes": {"summary": {"total_count": 180}},
+                "comments": {"summary": "bad"},
+            }
         if "graph.facebook.com" in url:
             return {"views": 1200, "like_count": 95, "comments_count": 14}
         raise AssertionError(url)
@@ -765,17 +815,25 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
     res_sync_cli = runner.invoke(app, ["analytics", "sync"])
     assert res_sync_cli.exit_code == 0, res_sync_cli.output
     res_sync_cli.output.encode("cp1252")
-    assert "YouTube updated: 1, Instagram updated: 1" in " ".join(res_sync_cli.output.split())
+    normalized_sync_out = " ".join(res_sync_cli.output.split())
+    assert "YouTube updated: 1, Instagram updated: 1, Facebook updated: 1" in normalized_sync_out
 
     res_sync_json = runner.invoke(app, ["analytics", "sync", "--json"])
     assert res_sync_json.exit_code == 0
     sync_rep = AnalyticsSyncReport.model_validate_json(res_sync_json.output)
-    assert sync_rep.youtube_updated == 1 and sync_rep.instagram_updated == 1
+    assert (
+        sync_rep.youtube_updated == 1
+        and sync_rep.instagram_updated == 1
+        and sync_rep.facebook_updated == 1
+    )
 
     cat_after = load_catalog()
     assert cat_after.published[0].analytics["youtube"].views == 4500
     assert cat_after.published[0].analytics["youtube"].comments == 0
     assert cat_after.published[0].analytics["instagram"].views == 1200
+    assert cat_after.published[0].analytics["facebook"].views == 2400
+    assert cat_after.published[0].analytics["facebook"].likes == 180
+    assert cat_after.published[0].analytics["facebook"].comments == 0
 
     # Analytics sync via OAuth Bearer fallback + HTTP failure warning paths
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
@@ -785,7 +843,7 @@ def test_publish_run_dry_run_live_analytics_sync_and_cli(
         lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("upstream 500")),
     )
     rep_err = sync_channel_analytics()
-    assert len(rep_err.warnings) == 2
+    assert len(rep_err.warnings) == 3
     res_warn_cli = runner.invoke(app, ["analytics", "sync"])
     assert res_warn_cli.exit_code == 0
     assert "[WARN]" in res_warn_cli.output
@@ -834,6 +892,9 @@ def test_instagram_auth_check_and_env_helpers(
     for key in (
         "IG_ACCESS_TOKEN",
         "IG_USER_ID",
+        "FB_PAGE_ID",
+        "FACEBOOK_PAGE_ID",
+        "FB_PAGE_ACCESS_TOKEN",
         "INSTAGRAM_ACCESS_TOKEN",
         "INSTAGRAM_BUSINESS_ACCOUNT_ID",
     ):
@@ -1068,7 +1129,10 @@ def test_instagram_auth_check_and_env_helpers(
     assert call_order == ["exchange", "accounts", "profile"]
     assert auth_sum["exchanged_long_lived"] is True
     assert auth_sum["ig_user_id"] == "ig-2"
-    assert "page-tok-2" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert auth_sum["fb_page_id"] == "p2"
+    saved_env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "page-tok-2" in saved_env_text
+    assert "FB_PAGE_ID=p2\n" in saved_env_text
     assert "access_token" not in json.dumps(auth_sum)
 
     # Invalid account index & manual ig_user_id match without exchange
@@ -1108,12 +1172,14 @@ def test_instagram_auth_check_and_env_helpers(
 
     manual_sum = authenticate_instagram("short1", ig_user_id="manual-99", root=tmp_path)
     assert manual_sum["ig_user_id"] == "manual-99"
+    assert manual_sum["fb_page_id"] is None
     assert manual_sum["profile"] is None
     assert "profile permissions missing" in str(manual_sum["profile_warning"])
 
     # 7. CLI `cm auth instagram` (--check disconnected + connected, flags, interactive prompts, errors)
     monkeypatch.delenv("IG_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("IG_USER_ID", raising=False)
+    monkeypatch.delenv("FB_PAGE_ID", raising=False)
     (tmp_path / ".env").write_text("", encoding="utf-8")
     res_chk_missing = runner.invoke(app, ["auth", "instagram", "--check"])
     assert res_chk_missing.exit_code == 0
@@ -1180,3 +1246,110 @@ def test_instagram_auth_check_and_env_helpers(
 
     res_bad = runner.invoke(app, ["auth", "instagram", "--token", "", "--json"])
     assert res_bad.exit_code == 1
+
+
+def test_upload_facebook_reel_direct_hosted_and_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mp4 = _make_valid_mp4(tmp_path / "fb_sample.mp4")
+    empty_mp4 = tmp_path / "fb_empty.mp4"
+    empty_mp4.write_bytes(b"")
+
+    with pytest.raises(ValueError, match="empty"):
+        upload_facebook_reel(empty_mp4, "cap", "page1", "tok1")
+
+    rupload_calls: list[tuple[str, bytes | None, dict[str, str]]] = []
+    phase_calls: list[dict[str, str]] = []
+
+    def _fake_fb_req(
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (method, timeout)
+        rupload_calls.append((url, data, dict(headers or {})))
+        return 200, {}, b'{"success": true}'
+
+    def _fake_fb_json(
+        url: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> object:
+        _ = (method, headers, timeout)
+        if url.endswith("/video_reels"):
+            parsed = dict(urllib.parse.parse_qsl((data or b"").decode("utf-8")))
+            phase_calls.append(parsed)
+            if parsed.get("upload_phase") == "start":
+                if len(phase_calls) == 1:
+                    return {
+                        "video_id": "fb-1",
+                        "upload_url": "https://rupload.facebook.com/video-upload/v21.0/fb-1",
+                    }
+                return {"video_id": "fb-2"}
+            return {"success": True}
+        if "fields=permalink_url" in url:
+            if "fb-2" in url:
+                raise RuntimeError("permalink denied")
+            return {"permalink_url": "/reel/fb-1/"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr("cm.publish.http_request", _fake_fb_req)
+    monkeypatch.setattr("cm.publish.http_json", _fake_fb_json)
+
+    # Direct local binary rupload + relative permalink_url resolution
+    res_dir = upload_facebook_reel(mp4, "direct fb cap", "page-1", "tok-fb")
+    assert res_dir.platform == "facebook"
+    assert res_dir.video_id == "fb-1"
+    assert res_dir.url == "https://www.facebook.com/reel/fb-1/"
+    assert res_dir.staged_url is None
+    assert phase_calls[0]["upload_phase"] == "start"
+    assert phase_calls[1]["upload_phase"] == "finish"
+    assert phase_calls[1]["video_state"] == "PUBLISHED"
+    assert rupload_calls[0][0] == "https://rupload.facebook.com/video-upload/v21.0/fb-1"
+    assert rupload_calls[0][1] == mp4.read_bytes()
+    assert rupload_calls[0][2]["Authorization"] == "OAuth tok-fb"
+    assert rupload_calls[0][2]["offset"] == "0"
+    assert rupload_calls[0][2]["file_size"] == str(mp4.stat().st_size)
+
+    # Hosted video_url mode + fallback rupload URI + permalink failure fallback
+    res_url = upload_facebook_reel(
+        mp4, "url fb cap", "page-1", "tok-fb", video_url="https://cdn.example/fb.mp4"
+    )
+    assert res_url.video_id == "fb-2"
+    assert res_url.url == "https://www.facebook.com/reel/fb-2"
+    assert res_url.staged_url == "https://cdn.example/fb.mp4"
+    assert rupload_calls[1][0] == "https://rupload.facebook.com/video-upload/v21.0/fb-2"
+    assert rupload_calls[1][1] == b""
+    assert rupload_calls[1][2]["file_url"] == "https://cdn.example/fb.mp4"
+
+    # Absolute permalink_url kept verbatim
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda u, **_k: (
+            {"video_id": "fb-3"}
+            if u.endswith("/video_reels")
+            else {"permalink_url": "https://www.facebook.com/share/r/fb-3"}
+        ),
+    )
+    res_abs = upload_facebook_reel(mp4, "abs", "page-1", "tok-fb")
+    assert res_abs.url == "https://www.facebook.com/share/r/fb-3"
+
+    # Error branches: missing video_id & finish phase success=False
+    monkeypatch.setattr("cm.publish.http_json", lambda *_a, **_k: {})
+    with pytest.raises(RuntimeError, match="missing 'video_id'"):
+        upload_facebook_reel(mp4, "c", "page-1", "tok-fb")
+
+    monkeypatch.setattr(
+        "cm.publish.http_json",
+        lambda _u, data=None, **_k: (
+            {"video_id": "fb-err"}
+            if b"upload_phase=start" in (data or b"")
+            else {"success": False}
+        ),
+    )
+    with pytest.raises(RuntimeError, match="finish phase failed"):
+        upload_facebook_reel(mp4, "c", "page-1", "tok-fb")
