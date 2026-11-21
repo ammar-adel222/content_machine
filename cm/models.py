@@ -371,6 +371,15 @@ class IdeaEntry(BaseModel):
         return [_clean_non_empty(step) for step in value]
 
 
+class PlatformMetrics(BaseModel):
+    """Per-platform engagement stats pulled by cm analytics sync."""
+
+    views: int = Field(default=0, ge=0)
+    likes: int = Field(default=0, ge=0)
+    comments: int = Field(default=0, ge=0)
+    synced_at: datetime
+
+
 class PublishedEntry(BaseModel):
     """Receipt of a published video stored for history and deduplication."""
 
@@ -381,6 +390,7 @@ class PublishedEntry(BaseModel):
     published_at: datetime
     platforms: dict[str, dict[str, str]] = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list)
+    analytics: dict[str, PlatformMetrics] = Field(default_factory=dict)
 
     @field_validator("title")
     @classmethod
@@ -638,3 +648,55 @@ class ResearchPlaybook(BaseModel):
     trends: list[TrendSignal] = Field(default_factory=list)
     learned_insights: list[str] = Field(default_factory=list)
     format_summary: FormatPatternSummary = Field(default_factory=FormatPatternSummary)
+
+
+class PublishPlatform(StrEnum):
+    """Supported social publishing targets."""
+
+    YOUTUBE = "youtube"
+    INSTAGRAM = "instagram"
+
+
+class YouTubePrivacy(StrEnum):
+    """YouTube upload visibility status values."""
+
+    PRIVATE = "private"
+    UNLISTED = "unlisted"
+    PUBLIC = "public"
+
+
+class PlatformPublishResult(BaseModel):
+    """Outcome for a single platform during cm publish."""
+
+    platform: Literal["youtube", "instagram"]
+    status: Literal["dry_run", "published", "skipped", "failed"]
+    video_id: str | None = None
+    url: str | None = None
+    privacy: str | None = None
+    staged_url: str | None = None
+    error: str | None = None
+
+
+class PublishReceipt(BaseModel):
+    """Release publishing receipt written to runs/<slug>/publish_receipt.json."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    slug: str
+    title: str
+    description: str
+    tags: list[str] = Field(default_factory=list)
+    video_path: str
+    dry_run: bool = False
+    published_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    results: list[PlatformPublishResult] = Field(default_factory=list)
+
+
+class AnalyticsSyncReport(BaseModel):
+    """Summary returned by cm analytics sync across published catalog videos."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    synced_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    videos_checked: int = 0
+    youtube_updated: int = 0
+    instagram_updated: int = 0
+    warnings: list[str] = Field(default_factory=list)

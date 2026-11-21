@@ -31,7 +31,21 @@ Confirm before publishing:
 ## Step 3: Publish & Close Feedback Loop
 
 - Exported deliverable sits at `runs/<slug>/final.mp4` with verified manifest `runs/<slug>/render_report.json`.
-- When automated publishing (`Milestone 8: cm publish` / `cm analytics sync`) is enabled:
-  1. Verify dry-run receipt first: `cm publish <slug> --dry-run`
-  2. Publish to YouTube Shorts / Instagram Reels and log the receipt in `channels/catalog.json` (`cm status <slug>`).
-  3. After 24–72h live views accumulate, run `cm analytics sync` to pull view/like/comment metrics back into `channels/catalog.json` and feed insights back into `ideate`.
+1. Link YouTube OAuth once (if `secrets/youtube_token.json` is not present):
+   ```powershell
+   cm auth youtube
+   ```
+2. Verify metadata, hashtags, and MP4 stream readiness in dry-run mode (never modifies `catalog.json` or uploads):
+   ```powershell
+   cm publish <slug> --dry-run
+   ```
+3. Publish to YouTube Shorts and/or Instagram Reels (receipt saved to `runs/<slug>/publish_receipt.json` and `channels/catalog.json`):
+   ```powershell
+   cm publish <slug> --platform youtube --privacy private
+   # Optional Instagram Reels (requires IG_USER_ID, IG_ACCESS_TOKEN, and IG_STAGING_PROVIDER or --video-url):
+   cm publish <slug> --platform youtube --platform instagram
+   ```
+4. After 24–72h live views accumulate, sync views, likes, and comments back into `channels/catalog.json` (`cm schema analytics`) and feed winning patterns back into `ideate`:
+   ```powershell
+   cm analytics sync
+   ```

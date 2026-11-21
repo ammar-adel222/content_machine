@@ -17,16 +17,20 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from cm.analytics import sync_channel_analytics
 from cm.audio import mix_run_audio
 from cm.catalog import add_idea, find_idea, load_catalog, set_idea_status
 from cm.models import (
     PIPELINE_ORDER,
+    AnalyticsSyncReport,
     AudioTimeline,
     Blueprint,
     Catalog,
     FormatPreset,
     IdeaStatus,
     PipelineStage,
+    PublishPlatform,
+    PublishReceipt,
     QaReport,
     RenderReport,
     ResearchPlaybook,
@@ -34,8 +38,10 @@ from cm.models import (
     StageRecord,
     StageStatus,
     TopicDomain,
+    YouTubePrivacy,
 )
 from cm.paths import resolve_engine_dir, run_dir
+from cm.publish import authenticate_youtube, publish_run
 from cm.renderer import FrameFormat, RenderQuality, render_video
 from cm.research import (
     YouTubeOrder,
@@ -88,11 +94,23 @@ research_app = typer.Typer(
     help="Scan YouTube Shorts competitors, trend feeds, and format playbook",
     no_args_is_help=True,
 )
+auth_app = typer.Typer(
+    name="auth",
+    help="Authenticate OAuth accounts for video publishing",
+    no_args_is_help=True,
+)
+analytics_app = typer.Typer(
+    name="analytics",
+    help="Synchronize live platform analytics back into channels/catalog.json",
+    no_args_is_help=True,
+)
 app.add_typer(ideas_app, name="ideas")
 app.add_typer(scene_app, name="scene")
 app.add_typer(sfx_app, name="sfx")
 app.add_typer(audio_app, name="audio")
 app.add_typer(research_app, name="research")
+app.add_typer(auth_app, name="auth")
+app.add_typer(analytics_app, name="analytics")
 
 console = Console()
 
@@ -115,6 +133,8 @@ class SchemaModel(StrEnum):
     TIMELINE = "timeline"
     RENDER = "render"
     RESEARCH = "research"
+    PUBLISH = "publish"
+    ANALYTICS = "analytics"
 
 
 def _ascii_safe(text: str) -> str:
@@ -351,7 +371,7 @@ def validate(
 def schema(
     model: SchemaModel = typer.Argument(
         SchemaModel.BLUEPRINT,
-        help="Schema to export: blueprint, state, catalog, qa, timeline, render, or research",
+        help="Schema to export: blueprint, state, catalog, qa, timeline, render, research, publish, or analytics",
     ),
 ) -> None:
     """Print the JSON Schema for a Content Machine contract model."""
@@ -363,6 +383,8 @@ def schema(
         SchemaModel.TIMELINE: AudioTimeline,
         SchemaModel.RENDER: RenderReport,
         SchemaModel.RESEARCH: ResearchPlaybook,
+        SchemaModel.PUBLISH: PublishReceipt,
+        SchemaModel.ANALYTICS: AnalyticsSyncReport,
     }
     typer.echo(json.dumps(model_map[model].model_json_schema(), indent=2))
 
@@ -1020,6 +1042,123 @@ def research_insight_cmd(
     console.print(
         f"[green][OK][/green] Saved insight ({len(playbook.learned_insights)} total): "
         f"{_ascii_safe(note.strip())}"
+    )
+
+
+@auth_app.command("youtube")
+def auth_youtube_cmd(
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Do not automatically open the browser login URL"
+    ),
+    timeout: float = typer.Option(
+        180.0, "--timeout", min=5.0, help="Seconds to wait for OAuth loopback callback"
+    ),
+    port: int = typer.Option(0, "--port", min=0, max=65535, help="Loopback callback port (0 = auto)"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON summary"),
+) -> None:
+    """Authenticate YouTube OAuth 2.0 (PKCE) via browser and save refresh token."""
+    try:
+        summary = authenticate_youtube(
+            open_browser=not no_browser,
+            timeout_sec=timeout,
+            port=port,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, TimeoutError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(json.dumps(summary, indent=2))
+        return
+
+    console.print(
+        f"[green][OK][/green] YouTube OAuth token saved to {summary['token_path']} "
+        f"(refresh_token={'yes' if summary['has_refresh_token'] else 'no'})"
+    )
+
+
+@app.command()
+def publish(
+    slug: str = typer.Argument(..., help="Run slug to publish"),
+    platform: list[PublishPlatform] | None = typer.Option(
+        None, "--platform", "-p", help="Target platform (repeatable: youtube, instagram)"
+    ),
+    privacy: YouTubePrivacy | None = typer.Option(
+        None, "--privacy", help="YouTube privacy: private, unlisted, or public"
+    ),
+    title: str | None = typer.Option(None, "--title", help="Override video title"),
+    description: str | None = typer.Option(None, "--description", help="Override description/caption"),
+    tag: list[str] | None = typer.Option(None, "--tag", help="Extra tag/hashtag (repeatable)"),
+    video: Path | None = typer.Option(None, "--video", help="Override MP4 path (defaults to final.mp4)"),
+    video_url: str | None = typer.Option(
+        None, "--video-url", help="Public HTTPS MP4 URL for Instagram Reels"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate metadata & MP4 without uploading"),
+    allow_mock_audio: bool = typer.Option(
+        False, "--allow-mock-audio", help="Allow publishing runs synthesized with --provider mock"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON PublishReceipt"),
+) -> None:
+    """Publish a rendered Short/Reel to YouTube Shorts and/or Instagram Reels."""
+    try:
+        receipt = publish_run(
+            slug=slug,
+            platforms=platform,
+            privacy=privacy,
+            title=title,
+            description=description,
+            extra_tags=tag,
+            video_path=video,
+            video_url=video_url,
+            dry_run=dry_run,
+            allow_mock_audio=allow_mock_audio,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    any_failed = any(r.status == "failed" for r in receipt.results)
+    all_failed = bool(receipt.results) and all(r.status == "failed" for r in receipt.results)
+
+    if as_json:
+        typer.echo(receipt.model_dump_json(indent=2))
+        if not dry_run and all_failed:
+            raise typer.Exit(code=1)
+        return
+
+    mode_tag = "DRY-RUN" if receipt.dry_run else "LIVE"
+    table = Table(title=f"Publish ({mode_tag}): {_ascii_safe(receipt.title)}", box=box.ASCII)
+    table.add_column("Platform", style="bold")
+    table.add_column("Status")
+    table.add_column("Video ID")
+    table.add_column("Details")
+    for res in receipt.results:
+        detail = res.url or res.error or (f"privacy={res.privacy}" if res.privacy else res.staged_url or "-")
+        table.add_row(res.platform, res.status, res.video_id or "-", _ascii_safe(detail))
+    console.print(table)
+    console.print(f"Tags: {', '.join('#' + t for t in receipt.tags)}")
+
+    if not dry_run and any_failed and all_failed:
+        raise typer.Exit(code=1)
+
+
+@analytics_app.command("sync")
+def analytics_sync_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON AnalyticsSyncReport"),
+) -> None:
+    """Pull live views, likes, and comments back into channels/catalog.json."""
+    try:
+        report = sync_channel_analytics()
+    except (ValueError, RuntimeError) as exc:
+        _fail(str(exc), as_json)
+
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+
+    for warn in report.warnings:
+        console.print(f"[yellow][WARN][/yellow] {_ascii_safe(warn)}")
+    console.print(
+        f"[green][OK][/green] Synced analytics across {report.videos_checked} catalog video(s) "
+        f"(YouTube updated: {report.youtube_updated}, Instagram updated: {report.instagram_updated})"
     )
 
 

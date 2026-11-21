@@ -341,14 +341,14 @@ def compute_next_action(state: RunState, root: Path | None = None) -> str:
         if rec.status in (StageStatus.PASSED, StageStatus.SKIPPED):
             continue
         if stage == PipelineStage.AUDIO:
-            return f"Generate TTS & audio timeline: cm tts {state.slug} (Milestone 4)"
+            return f"Generate TTS & audio timeline: cm tts {state.slug}"
         if stage == PipelineStage.SCENE:
-            return f"Build runs/{state.slug}/scene.html using engine/ primitives (Milestone 2)"
+            return f"Build runs/{state.slug}/scene.html: cm scene init {state.slug}"
         if stage == PipelineStage.QA:
-            return f"Run visual QA snapshotter: cm snapshot {state.slug} (Milestone 3)"
+            return f"Run visual QA snapshotter: cm snapshot {state.slug} --mode all"
         if stage == PipelineStage.RENDER:
-            return f"Render MP4 video: cm render {state.slug} (Milestone 5)"
+            return f"Render MP4 video: cm render {state.slug} --quality final"
         if stage == PipelineStage.PUBLISH:
-            return f"Publish Short/Reel: cm publish {state.slug} --dry-run (Milestone 7)"
+            return f"Publish Short/Reel: cm publish {state.slug} --dry-run"
 
     return "Complete! Published and recorded in channels/catalog.json."

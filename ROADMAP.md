@@ -41,6 +41,6 @@ Every milestone and change must satisfy these non-negotiable checks before commi
    - `AGENTS.md`, `CLAUDE.md`, and `.agents/skills/` (`ideate`, `blueprint`, `build-scene`, `visual-qa`, `publish`).
    - Produce and verify 1 complete flagship prototype Short (`rate-limiter`) end-to-end.
 
-8. **Milestone 8 — Auto-Publishing & Analytics Sync (YouTube Shorts & Instagram Reels)**
-   - `cm auth youtube`, `cm publish <slug> --dry-run` / live upload via YouTube Data API v3 + Instagram Graph API (with pluggable staging uploader) + `channels/catalog.json` publish receipts.
-   - **Channel Analytics Sync (`cm analytics sync`):** Pulls views, likes, and comments for our own published Shorts back into `channels/catalog.json` to close the feedback loop.
+8. **[DONE] Milestone 8 — Auto-Publishing & Analytics Sync (YouTube Shorts & Instagram Reels)**
+   - `cm auth youtube`, `cm publish <slug> --dry-run` / live upload via YouTube Data API v3 + Instagram Graph API (with S3/R2 SigV4 staging uploader) + `channels/catalog.json` publish receipts.
+   - **Channel Analytics Sync (`cm analytics sync`):** Pulls views, likes, and comments for our own published Shorts/Reels back into `channels/catalog.json` to close the feedback loop.

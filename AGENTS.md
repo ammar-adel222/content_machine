@@ -43,9 +43,13 @@ Invoke CLI commands via `.venv\Scripts\cm.exe` (Windows) or `.venv/bin/cm` (Linu
    - `cm snapshot <slug> --mode all` *(captures 3 frames per beat = start/mid/end, builds `qa/contact_sheet.png`, audits DOM overlap, safe zones, font sizes, and visual diff >= `0.5%`)*
    - **Visually inspect** `runs/<slug>/qa/contact_sheet.png` before rendering! Fix any crowding or layout bugs and re-run `cm snapshot <slug> --mode all`.
    - `cm render <slug> --quality preview` *(30fps quick check)* -> `cm render <slug> --quality final` *(60fps H.264 `yuv420p` + AAC `192k`)*
-5. **Status & Schemas:**
+5. **Publishing & Analytics:**
+   - `cm auth youtube` *(browser OAuth 2.0 PKCE flow -> `secrets/youtube_token.json`)*
+   - `cm publish <slug> --dry-run` -> `cm publish <slug> --platform youtube --privacy private` *(supports `--platform instagram` via `IG_STAGING_PROVIDER` or `--video-url`)*
+   - `cm analytics sync` *(pulls live views/likes/comments into `channels/catalog.json`)*
+6. **Status & Schemas:**
    - `cm status` / `cm status <slug>`
-   - `cm schema <blueprint|state|catalog|qa|timeline|render|research>`
+   - `cm schema <blueprint|state|catalog|qa|timeline|render|research|publish|analytics>`
 
 ## Non-Negotiable Rules
 

@@ -17,6 +17,7 @@ An agent-native content production harness built for coding agents (**Antigravit
 - **Sound Design (`cm sfx`, `cm audio`):** Semantic SFX cue slots (`assets/sfx/manifest.json`) backed by procedural WAV synth + FFmpeg SFX mixing, music sidechain ducking, and `-14 LUFS` mastering.
 - **2D Visual Engine (`engine/` & `cm snapshot`):** Deterministic HTML5 / SVG virtual clock rendered cleanly inside mobile safe zones, audited across start/mid/end keyframes with Chromium (`cm snapshot --mode all`).
 - **Video Renderer (`cm render`):** Parallel headless Chromium chunk capture piped into FFmpeg H.264 (`yuv420p`) / AAC MP4 (`30fps` preview / `60fps` final).
+- **Auto-Publishing & Analytics (`cm auth`, `cm publish`, `cm analytics sync`):** YouTube OAuth 2.0 PKCE upload (`private`/`unlisted`/`public`), Instagram Reels Graph API + pure-stdlib S3/R2 SigV4 staging, and analytics feedback into `channels/catalog.json`.
 
 ## Quickstart
 
@@ -31,6 +32,12 @@ An agent-native content production harness built for coding agents (**Antigravit
 .\.venv\Scripts\cm.exe tts rate-limiter --provider auto
 .\.venv\Scripts\cm.exe snapshot rate-limiter --mode all
 .\.venv\Scripts\cm.exe render rate-limiter --quality preview --fps 30
+
+# 3. Authenticate YouTube, dry-run or publish, and sync analytics
+.\.venv\Scripts\cm.exe auth youtube
+.\.venv\Scripts\cm.exe publish rate-limiter --dry-run
+.\.venv\Scripts\cm.exe publish rate-limiter --platform youtube --privacy private
+.\.venv\Scripts\cm.exe analytics sync
 ```
 
 Reference examples:

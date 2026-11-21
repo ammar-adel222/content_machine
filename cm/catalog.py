@@ -10,7 +10,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from cm.models import Catalog, FormatPreset, IdeaEntry, IdeaStatus, TopicDomain
+from cm.models import (
+    Catalog,
+    FormatPreset,
+    IdeaEntry,
+    IdeaStatus,
+    PublishedEntry,
+    TopicDomain,
+)
 from cm.paths import atomic_write_text, catalog_path
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -188,3 +195,53 @@ def set_idea_status(ref: str, status: IdeaStatus, root: Path | None = None) -> I
     idea.status = status
     save_catalog(catalog, root)
     return idea
+
+
+def record_published_entry(
+    slug: str,
+    title: str,
+    topic_domain: TopicDomain,
+    fmt: FormatPreset,
+    platforms: dict[str, dict[str, str]],
+    keywords: list[str] | None = None,
+    root: Path | None = None,
+) -> PublishedEntry:
+    """Upsert a published video receipt in channels/catalog.json and mark matching idea published."""
+    catalog = load_catalog(root)
+    now = datetime.now(UTC)
+    existing = next((item for item in catalog.published if item.slug == slug), None)
+
+    dedup_keywords: list[str] = []
+    seen_kw: set[str] = set()
+    for raw_kw in [*(existing.keywords if existing else []), *(keywords or [])]:
+        clean = raw_kw.strip()
+        if clean and clean.lower() not in seen_kw:
+            seen_kw.add(clean.lower())
+            dedup_keywords.append(clean)
+
+    if existing is not None:
+        existing.title = title.strip()
+        existing.topic_domain = topic_domain
+        existing.format = fmt
+        existing.published_at = now
+        existing.platforms.update(platforms)
+        existing.keywords = dedup_keywords
+        entry = existing
+    else:
+        entry = PublishedEntry(
+            slug=slug,
+            title=title.strip(),
+            topic_domain=topic_domain,
+            format=fmt,
+            published_at=now,
+            platforms=dict(platforms),
+            keywords=dedup_keywords,
+        )
+        catalog.published.append(entry)
+
+    for idea in catalog.ideas:
+        if idea.slug == slug:
+            idea.status = IdeaStatus.PUBLISHED
+
+    save_catalog(catalog, root)
+    return entry
